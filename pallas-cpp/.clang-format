@@ -1,0 +1,31 @@
+# Base style (e.g., Google, LLVM)
+BasedOnStyle: Google
+# Alignment options for comments
+AlignTrailingComments: true
+SpacesBeforeTrailingComments: 2
+ColumnLimit: 80
+MaxEmptyLinesToKeep: 1
+# Indent "//" comments with code blocks
+IndentWidth: 4
+TabWidth: 4
+UseTab: Never
+# Allow alignment of standalone comments
+CommentPragmas: '^IWYU'
+# Example for fine-grained control of certain spacing around specific types of code constructs:
+SpaceBeforeParens: ControlStatements
+# Control how braces behave for different code constructs
+BraceWrapping:
+  AfterClass:      true
+  AfterControlStatement: true
+  AfterEnum:       true
+  AfterFunction:   true
+  AfterNamespace:  true
+  AfterStruct:     true
+  AfterUnion:      true
+  AfterExternBlock: true
+  BeforeCatch:     true
+  BeforeElse:      true
+  IndentBraces:    true
+# Ensure references (&) stick to the type
+DerivePointerAlignment: false
+PointerAlignment: Left
