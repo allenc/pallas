@@ -1,3 +1,8 @@
+#include <fstream>
+#include <opencv2/imgproc.hpp>
+#include <random>
+
+#include "../core/logger.h"
 #include "yolo.h"
 
 namespace pallas {
@@ -14,8 +19,7 @@ std::vector<std::string> getClassNames(const std::string& path) {
             classNames.emplace_back(line);
         }
     } else {
-        std::cerr << "ERROR: Failed to access class name path: " << path
-                  << std::endl;
+        LOGE("ERROR: Failed to access class name path: {}", path);
     }
     return classNames;
 }
@@ -98,18 +102,20 @@ BoundingBox scaleCoords(const cv::Size& imageShape, BoundingBox coords,
     int padY = static_cast<int>(std::round(
         (imageShape.height - imageOriginalShape.height * gain) / 2.0f));
 
-    result.x = static_cast<int>(std::round((coords.x - padX) / gain));
-    result.y = static_cast<int>(std::round((coords.y - padY) / gain));
+    result.center.x =
+        static_cast<int>(std::round((coords.center.x - padX) / gain));
+    result.center.y =
+        static_cast<int>(std::round((coords.center.y - padY) / gain));
     result.width = static_cast<int>(std::round(coords.width / gain));
     result.height = static_cast<int>(std::round(coords.height / gain));
 
     if (p_Clip) {
-        result.x = clamp(result.x, 0, imageOriginalShape.width);
-        result.y = clamp(result.y, 0, imageOriginalShape.height);
+        result.center.x = clamp(result.center.x, 0, imageOriginalShape.width);
+        result.center.y = clamp(result.center.y, 0, imageOriginalShape.height);
         result.width =
-            clamp(result.width, 0, imageOriginalShape.width - result.x);
-        result.height =
-            clamp(result.height, 0, imageOriginalShape.height - result.y);
+            clamp(result.width, 0, imageOriginalShape.width - result.center.x);
+        result.height = clamp(result.height, 0,
+                              imageOriginalShape.height - result.center.y);
     }
     return result;
 }
@@ -156,10 +162,10 @@ void NMSBoxes(const std::vector<BoundingBox>& boundingBoxes,
         indices.push_back(currentIdx);
 
         const BoundingBox& currentBox = boundingBoxes[currentIdx];
-        const float x1_max = currentBox.x;
-        const float y1_max = currentBox.y;
-        const float x2_max = currentBox.x + currentBox.width;
-        const float y2_max = currentBox.y + currentBox.height;
+        const float x1_max = currentBox.center.x;
+        const float y1_max = currentBox.center.y;
+        const float x2_max = currentBox.center.x + currentBox.width;
+        const float y2_max = currentBox.center.y + currentBox.height;
         const float area_current = areas[currentIdx];
 
         for (size_t j = i + 1; j < sortedIndices.size(); ++j) {
@@ -169,12 +175,16 @@ void NMSBoxes(const std::vector<BoundingBox>& boundingBoxes,
             }
 
             const BoundingBox& compareBox = boundingBoxes[compareIdx];
-            const float x1 = std::max(x1_max, static_cast<float>(compareBox.x));
-            const float y1 = std::max(y1_max, static_cast<float>(compareBox.y));
+            const float x1 =
+                std::max(x1_max, static_cast<float>(compareBox.center.x));
+            const float y1 =
+                std::max(y1_max, static_cast<float>(compareBox.center.y));
             const float x2 = std::min(
-                x2_max, static_cast<float>(compareBox.x + compareBox.width));
+                x2_max,
+                static_cast<float>(compareBox.center.x + compareBox.width));
             const float y2 = std::min(
-                y2_max, static_cast<float>(compareBox.y + compareBox.height));
+                y2_max,
+                static_cast<float>(compareBox.center.y + compareBox.height));
 
             const float interWidth = x2 - x1;
             const float interHeight = y2 - y1;
@@ -231,20 +241,21 @@ void drawBoundingBox(cv::Mat& image, const std::vector<Detection>& detections,
     for (const auto& detection : detections) {
         // if (detection.conf <= CONFIDENCE_THRESHOLD) continue;
 
-        if (detection.classId < 0 ||
-            static_cast<size_t>(detection.classId) >= classNames.size())
+        if (detection.class_id < 0 ||
+            static_cast<size_t>(detection.class_id) >= classNames.size())
             continue;
 
-        const cv::Scalar& color = colors[detection.classId % colors.size()];
+        const cv::Scalar& color = colors[detection.class_id % colors.size()];
 
-        cv::rectangle(image, cv::Point(detection.box.x, detection.box.y),
-                      cv::Point(detection.box.x + detection.box.width,
-                                detection.box.y + detection.box.height),
+        cv::rectangle(image,
+                      cv::Point(detection.box.center.x, detection.box.center.y),
+                      cv::Point(detection.box.center.x + detection.box.width,
+                                detection.box.center.y + detection.box.height),
                       color, 2, cv::LINE_AA);
 
         std::string label =
-            classNames[detection.classId] + ": " +
-            std::to_string(static_cast<int>(detection.conf * 100)) + "%";
+            classNames[detection.class_id] + ": " +
+            std::to_string(static_cast<int>(detection.confidence * 100)) + "%";
 
         int fontFace = cv::FONT_HERSHEY_SIMPLEX;
         double fontScale = std::min(image.rows, image.cols) * 0.0008;
@@ -255,15 +266,17 @@ void drawBoundingBox(cv::Mat& image, const std::vector<Detection>& detections,
         cv::Size textSize =
             cv::getTextSize(label, fontFace, fontScale, thickness, &baseline);
 
-        int labelY = std::max(detection.box.y, textSize.height + 5);
-        cv::Point labelTopLeft(detection.box.x, labelY - textSize.height - 5);
-        cv::Point labelBottomRight(detection.box.x + textSize.width + 5,
+        int labelY = std::max(detection.box.center.y, textSize.height + 5);
+        cv::Point labelTopLeft(detection.box.center.x,
+                               labelY - textSize.height - 5);
+        cv::Point labelBottomRight(detection.box.center.x + textSize.width + 5,
                                    labelY + baseline - 5);
 
         cv::rectangle(image, labelTopLeft, labelBottomRight, color, cv::FILLED);
 
-        cv::putText(image, label, cv::Point(detection.box.x + 2, labelY - 2),
-                    fontFace, fontScale, cv::Scalar(255, 255, 255), thickness,
+        cv::putText(image, label,
+                    cv::Point(detection.box.center.x + 2, labelY - 2), fontFace,
+                    fontScale, cv::Scalar(255, 255, 255), thickness,
                     cv::LINE_AA);
     }
 }
@@ -274,8 +287,7 @@ void drawBoundingBoxMask(cv::Mat& image,
                          const std::vector<cv::Scalar>& classColors,
                          float maskAlpha) {
     if (image.empty()) {
-        std::cerr << "ERROR: Empty image provided to drawBoundingBoxMask."
-                  << std::endl;
+        LOGE("ERROR: Empty image provided to drawBoundingBoxMask.");
         return;
     }
 
@@ -291,43 +303,46 @@ void drawBoundingBoxMask(cv::Mat& image,
     std::vector<const Detection*> filteredDetections;
     for (const auto& detection : detections) {
         if (  // detection.conf > CONFIDENCE_THRESHOLD &&
-            detection.classId >= 0 &&
-            static_cast<size_t>(detection.classId) < classNames.size()) {
+            detection.class_id >= 0 &&
+            static_cast<size_t>(detection.class_id) < classNames.size()) {
             filteredDetections.emplace_back(&detection);
         }
     }
 
     for (const auto* detection : filteredDetections) {
-        cv::Rect box(detection->box.x, detection->box.y, detection->box.width,
-                     detection->box.height);
-        const cv::Scalar& color = classColors[detection->classId];
+        cv::Rect box(detection->box.center.x, detection->box.center.y,
+                     detection->box.width, detection->box.height);
+        const cv::Scalar& color = classColors[detection->class_id];
         cv::rectangle(maskImage, box, color, cv::FILLED);
     }
 
     cv::addWeighted(maskImage, maskAlpha, image, 1.0f, 0, image);
 
     for (const auto* detection : filteredDetections) {
-        cv::Rect box(detection->box.x, detection->box.y, detection->box.width,
-                     detection->box.height);
-        const cv::Scalar& color = classColors[detection->classId];
+        cv::Rect box(detection->box.center.x, detection->box.center.y,
+                     detection->box.width, detection->box.height);
+        const cv::Scalar& color = classColors[detection->class_id];
         cv::rectangle(image, box, color, 2, cv::LINE_AA);
 
         std::string label =
-            classNames[detection->classId] + ": " +
-            std::to_string(static_cast<int>(detection->conf * 100)) + "%";
+            classNames[detection->class_id] + ": " +
+            std::to_string(static_cast<int>(detection->confidence * 100)) + "%";
         int baseLine = 0;
         cv::Size labelSize =
             cv::getTextSize(label, cv::FONT_HERSHEY_SIMPLEX, fontSize,
                             textThickness, &baseLine);
 
-        int labelY = std::max(detection->box.y, labelSize.height + 5);
-        cv::Point labelTopLeft(detection->box.x, labelY - labelSize.height - 5);
-        cv::Point labelBottomRight(detection->box.x + labelSize.width + 5,
-                                   labelY + baseLine - 5);
+        int labelY = std::max(detection->box.center.y, labelSize.height + 5);
+        cv::Point labelTopLeft(detection->box.center.x,
+                               labelY - labelSize.height - 5);
+        cv::Point labelBottomRight(
+            detection->box.center.x + labelSize.width + 5,
+            labelY + baseLine - 5);
 
         cv::rectangle(image, labelTopLeft, labelBottomRight, color, cv::FILLED);
 
-        cv::putText(image, label, cv::Point(detection->box.x + 2, labelY - 2),
+        cv::putText(image, label,
+                    cv::Point(detection->box.center.x + 2, labelY - 2),
                     cv::FONT_HERSHEY_SIMPLEX, fontSize,
                     cv::Scalar(255, 255, 255), textThickness, cv::LINE_AA);
     }

@@ -6,7 +6,11 @@
 
 namespace pallas {
 
-Timer::Timer() {}
+Timer::Timer(const std::string& name) {
+    if (!name.empty()) {
+        start(name);
+    }
+}
 
 void Timer::start(const std::string& name) {
     timers_[name] = std::chrono::high_resolution_clock::now();

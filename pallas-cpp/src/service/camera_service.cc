@@ -5,6 +5,8 @@
 #include <expected>
 #include <filesystem>
 #include <iostream>
+#include <opencv2/core/mat.hpp>
+#include <opencv2/imgcodecs.hpp>
 #include <thread>
 
 namespace pallas {
@@ -33,6 +35,7 @@ bool CameraService::start() {
         LOGW("Failed to open camera on start.");
         return false;
     }
+
     capture_.set(cv::CAP_PROP_FRAME_WIDTH, 1280);
     capture_.set(cv::CAP_PROP_FRAME_HEIGHT, 720);
 
@@ -46,7 +49,7 @@ void CameraService::stop() {
     Service::stop();
 }
 
-Result<void> CameraService::tick() {
+std::expected<void, std::string> CameraService::tick() {
     if (!capture_.isOpened()) {
         return std::unexpected("Failed to open camera on tick.");
     }
@@ -65,13 +68,13 @@ Result<void> CameraService::tick() {
 
     if (true)  // Write frames as images
     {
-        static std::atomic<int> frame_idx{0};
+        static int frame_idx{0};
         std::string filename =
             "./camera_service/frame_" + std::to_string(frame_idx++) + ".png";
         cv::imwrite(filename, frame);
     }
 
-    return Result<void>{};
+    return std::expected<void, std::string>{};
 }
 
 }  // namespace pallas

@@ -1,12 +1,15 @@
 #include "inference_service.h"
 
 #include <core/logger.h>
-#include <core/mat_queue_utils.h>
 #include <core/timer.h>
 
 #include <expected>
 #include <iostream>
+#include <opencv2/core/mat.hpp>
+#include <opencv2/imgproc.hpp>
 #include <thread>
+
+#include "mat_queue_utils.h"
 
 namespace pallas {
 
@@ -39,10 +42,10 @@ bool InferenceService::start() {
 
 void InferenceService::stop() { Service::stop(); }
 
-Result<void> InferenceService::tick() {
+std::expected<void, std::string> InferenceService::tick() {
     LOGI("InferenceService::tick()");
 
-    Timer timer;
+    Timer timer{};
 
     for (const auto& [name, queue_ptr] : queue_by_name_) {
         if (!queue_ptr) {
@@ -71,7 +74,7 @@ Result<void> InferenceService::tick() {
         }
         const int person_class_id = 0;
         for (const auto& detection : detections) {
-            if (detection.classId != person_class_id) {
+            if (detection.class_id != person_class_id) {
                 continue;
             }
 
@@ -85,7 +88,7 @@ Result<void> InferenceService::tick() {
         }
     }
 
-    return Result<void>{};
+    return std::expected<void, std::string>{};
 }
 
 }  // namespace pallas

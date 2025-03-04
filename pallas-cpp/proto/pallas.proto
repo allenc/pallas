@@ -1,0 +1,76 @@
+@0xc3b829e9f3c2c1a8;  # Unique file ID generated randomly
+
+struct Timestamp {
+  seconds @0 :UInt64;  # Seconds since Unix epoch
+  nanoseconds @1 :UInt32;  # Nanosecond precision
+}
+
+struct Time {
+  hour @0 :UInt8;          # 0-23
+  minute @1 :UInt8;        # 0-59
+  second @2 :UInt8;        # 0-59
+  millisecond @3 :UInt16;  # 0-999
+  day @4 :UInt8;           # 1-31
+  month @5 :UInt8;         # 1-12
+  year @6 :UInt16;         # e.g., 2024
+}
+
+struct Point {
+  x @0 :Float32;  # Normalized 0-1 within video frame
+  y @1 :Float32;  # Normalized 0-1 within video frame
+}
+
+struct BoundingBox {
+  x @0 :Float32;  # Top-left x coordinate (normalized 0-1)
+  y @1 :Float32;  # Top-left y coordinate (normalized 0-1)
+  width @2 :Float32;  # Width (normalized 0-1)
+  height @3 :Float32;  # Height (normalized 0-1)
+}
+
+enum DetectionType {
+  unknown @0;
+  person @1;
+  vehicle @2;
+  animal @3;
+}
+
+struct Detection {
+  type @0 :DetectionType;  # Type of detected object
+  bounding_box @1 :BoundingBox;  # Location in the frame
+  confidence @2 :Float32;  # Detection confidence score (0-1)
+  metadata @3 :List(Text);  # Any additional metadata (e.g., "person_name", "authorized")
+}
+
+struct Resolution {
+  width @0 :UInt32;
+  height @1 :UInt32;
+}
+
+struct Image {
+  data @0 :Data;  # Raw image data
+  format @1 :Text;  # Image format (e.g., "jpeg", "png")
+}
+
+struct Camera {
+  id @0 :Text;      # Unique camera identifier
+  name @1 :Text;    # User-defined camera name
+  online @2 :Bool;  # Is the camera currently connected
+  location @3 :Text;  # User-defined location (e.g., "Front Door")
+}
+
+struct Frame {
+  image @0 :Image;  # The captured image
+  resolution @1 :Resolution;  # Frame resolution
+  detections @2 :List(Detection);  # List of detections in this frame
+  timestamp @3 :Timestamp;  # When this frame was captured
+}
+
+struct Feed {
+  camera @0 :Camera;  # Camera information
+  frame @1 :Frame;    # Current frame from the camera
+}
+
+struct VisualizeElements {
+  time @0 :Time;  # Current system time
+  feeds @1 :List(Feed);  # List of camera feeds
+}

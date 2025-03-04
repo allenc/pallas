@@ -1,14 +1,16 @@
 #include "viewer_service.h"
 
 #include <core/logger.h>
-#include <core/mat_queue_utils.h>
 #include <fmt/format.h>
 
 #include <chrono>
 #include <expected>
 #include <filesystem>
-#include <opencv2/opencv.hpp>
+#include <opencv2/core/mat.hpp>
+#include <opencv2/imgcodecs.hpp>
 #include <thread>
+
+#include "mat_queue_utils.h"
 
 namespace pallas {
 
@@ -40,7 +42,7 @@ void ViewerService::stop() {
     Service::stop();
 }
 
-Result<void> ViewerService::tick() {
+std::expected<void, std::string> ViewerService::tick() {
     LOGI("ViewerService::tick()");
     for (const auto& [name, queue_ptr] : queue_by_name_) {
         if (!queue_ptr) {
@@ -62,7 +64,7 @@ Result<void> ViewerService::tick() {
         }
     }
 
-    return Result<void>{};
+    return std::expected<void, std::string>{};
 }
 
 }  // namespace pallas

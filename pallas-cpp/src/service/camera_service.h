@@ -1,13 +1,14 @@
 #pragma once
 
-#include <core/mat_queue.h>
-#include <core/result.h>
 #include <core/service.h>
 
 #include <cstddef>
+#include <expected>
 #include <memory>
-#include <opencv2/opencv.hpp>
+#include <opencv2/videoio.hpp>
 #include <string>
+
+#include "mat_queue.h"
 
 namespace pallas {
 
@@ -26,7 +27,7 @@ class CameraService : public Service {
     void stop() override;
 
    protected:
-    Result<void> tick() override;
+    std::expected<void, std::string> tick() override;
 
    private:
     using Queue = MatQueue<2764800>;

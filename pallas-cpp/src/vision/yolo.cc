@@ -1,27 +1,10 @@
 #include "yolo.h"
 
-#include <sstream>
+#include <opencv2/imgproc.hpp>
 
-#include "core/logger.h"
+#include "../core/logger.h"
 
 namespace pallas {
-
-std::string Detection::to_string() const {
-    std::stringstream ss;
-    ss << *this;
-
-    return ss.str();
-}
-
-std::ostream& operator<<(std::ostream& os, const Detection& detection) {
-    os << fmt::format(
-        "Detection(box={{x={}, y={}, width={}, height={}}}, "
-        "confidence={:.4f}, class_id={})",
-        detection.box.x, detection.box.y, detection.box.width,
-        detection.box.height, detection.conf, detection.classId);
-
-    return os;
-}
 
 YouOnlyLookOnce::YouOnlyLookOnce(const std::string& modelPath,
                                  const std::string& labelsPath, bool useGPU) {
@@ -40,14 +23,13 @@ YouOnlyLookOnce::YouOnlyLookOnce(const std::string& modelPath,
     OrtCUDAProviderOptions cudaOption;
 
     if (useGPU && cudaAvailable != availableProviders.end()) {
-        std::cout << "Inference device: GPU" << std::endl;
+        LOGI("Inference device: GPU");
         sessionOptions.AppendExecutionProvider_CUDA(cudaOption);
     } else {
         if (useGPU) {
-            std::cout << "GPU not supported by ONNXRuntime build. Using CPU."
-                      << std::endl;
+            LOGI("GPU not supported by ONNXRuntime build. Using CPU.");
         }
-        std::cout << "Inference device: CPU" << std::endl;
+        LOGI("Inference device: CPU.");
     }
 
 #ifdef _WIN32
@@ -87,8 +69,8 @@ YouOnlyLookOnce::YouOnlyLookOnce(const std::string& modelPath,
     classNames_ = utils::getClassNames(labelsPath);
     classColors = utils::generateColors(classNames_);
 
-    std::cout << "Model loaded with " << numInputNodes << " input nodes and "
-              << numOutputNodes << " output nodes." << std::endl;
+    LOGI("Model loaded with {} input nodes and {} output nodes.", numInputNodes,
+         numOutputNodes);
 }
 
 cv::Mat YouOnlyLookOnce::preprocess(const cv::Mat& image, float*& blob,
@@ -168,18 +150,20 @@ std::vector<Detection> YouOnlyLookOnce::postprocess(
             float top = centerY - height / 2.0f;
 
             BoundingBox scaledBox = utils::scaleCoords(
-                resizedImageShape, BoundingBox(left, top, width, height),
+                resizedImageShape,
+                BoundingBox({static_cast<int>(left), static_cast<int>(top)},
+                            width, height),
                 originalImageSize, true);
 
             BoundingBox roundedBox;
-            roundedBox.x = std::round(scaledBox.x);
-            roundedBox.y = std::round(scaledBox.y);
+            roundedBox.center.x = std::round(scaledBox.center.x);
+            roundedBox.center.y = std::round(scaledBox.center.y);
             roundedBox.width = std::round(scaledBox.width);
             roundedBox.height = std::round(scaledBox.height);
 
             BoundingBox nmsBox = roundedBox;
-            nmsBox.x += classId * 7680;
-            nmsBox.y += classId * 7680;
+            nmsBox.center.x += classId * 7680;
+            nmsBox.center.y += classId * 7680;
 
             nms_boxes.emplace_back(nmsBox);
             boxes.emplace_back(roundedBox);
@@ -194,7 +178,7 @@ std::vector<Detection> YouOnlyLookOnce::postprocess(
     detections.reserve(indices.size());
     for (const int idx : indices) {
         detections.emplace_back(
-            Detection{boxes[idx], confs[idx], classIds[idx]});
+            Detection{boxes[idx], classIds[idx], confs[idx]});
     }
 
     return detections;
@@ -204,7 +188,7 @@ std::vector<Detection> YouOnlyLookOnce::detect(const cv::Mat& image,
                                                float confThreshold,
                                                float iouThreshold) {
     if (image.empty()) {
-        std::cerr << "Error: Empty image provided to detector" << std::endl;
+        LOGW("Error: Empty image provided to detector");
         return {};
     }
 
@@ -248,14 +232,30 @@ void YouOnlyLookOnce::drawBoundingBox(
 
 void YouOnlyLookOnce::drawBoundingBoxMask(
     cv::Mat& image, const std::vector<Detection>& detections,
-
     float maskAlpha) const {
     utils::drawBoundingBoxMask(image, detections, classNames_, classColors,
                                maskAlpha);
 }
 
-const std::vector<std::string>& YouOnlyLookOnce::classNames() const {
+const std::vector<std::string>& YouOnlyLookOnce::class_names() const {
     return classNames_;
+}
+
+std::string Detection::to_string() const {
+    std::stringstream ss;
+    ss << *this;
+
+    return ss.str();
+}
+
+std::ostream& operator<<(std::ostream& os, const Detection& detection) {
+    os << fmt::format(
+        "Detection(box={{x={}, y={}, width={}, height={}}}, "
+        "confidence={:.4f}, class_id={})",
+        detection.box.center.x, detection.box.center.y, detection.box.width,
+        detection.box.height, detection.confidence, detection.class_id);
+
+    return os;
 }
 
 }  // namespace pallas

@@ -30,22 +30,34 @@
             expected-lite
             gtest
             onnxruntime
+            capnproto
+            python312 # start of py packages
+            python3Packages.nanobind
+            python3Packages.opencv4
           ];
 
-          # TODO if i need this shit 
           shellHook = ''
-            # Save the original PS1
-            ORIGINAL_PS1="$PS1"
-
+            export PYTHONPATH=$PWD/build:$PYTHONPATH
+              
             # Change PS1 color when entering nix-shell
             PS1="\[\033[0;32m\][nix-shell]\[\033[0m\] $PS1"
+          '';          
 
-            # Force CMake to use the specified Python version
-            # export CMAKE_PREFIX_PATH="${pkgs.python312}:$CMAKE_PREFIX_PATH"
-            # export Python3_ROOT_DIR="${pkgs.python312}"
-            # export Python3_EXECUTABLE="${pkgs.python312}/bin/python3"
-            # export CMAKE_ARGS="-DPython3_ROOT_DIR=${pkgs.python312} -DPython3_EXECUTABLE=${pkgs.python312}/bin/python3"
-        '';
+          # TODO if i need this shit 
+        #   shellHook = ''
+        #     # Save the original PS1
+
+        #     ORIGINAL_PS1="$PS1"
+
+        #     # Change PS1 color when entering nix-shell
+        #     PS1="\[\033[0;32m\][nix-shell]\[\033[0m\] $PS1"
+
+        #     # Force CMake to use the specified Python version
+        #     # export CMAKE_PREFIX_PATH="${pkgs.python312}:$CMAKE_PREFIX_PATH"
+        #     # export Python3_ROOT_DIR="${pkgs.python312}"
+        #     # export Python3_EXECUTABLE="${pkgs.python312}/bin/python3"
+        #     # export CMAKE_ARGS="-DPython3_ROOT_DIR=${pkgs.python312} -DPython3_EXECUTABLE=${pkgs.python312}/bin/python3"
+        # '';
         };
       };
     };

@@ -1,4 +1,4 @@
-#include "core/sam.h"
+#include "sam.h"
 
 #include <opencv2/opencv.hpp>
 

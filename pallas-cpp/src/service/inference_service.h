@@ -1,16 +1,16 @@
 #pragma once
 
-#include <core/mat_queue.h>
-#include <core/result.h>
-#include <core/sam.h>
 #include <core/service.h>
-#include <core/yolo.h>
+#include <vision/sam.h>
+#include <vision/yolo.h>
 
+#include <expected>
 #include <memory>
-#include <opencv2/opencv.hpp>
 #include <string>
 #include <unordered_map>
 #include <vector>
+
+#include "mat_queue.h"
 
 namespace pallas {
 
@@ -39,7 +39,7 @@ class InferenceService : public Service {
    protected:
     using Queue = MatQueue<2764800>;  // MacOS frame size
 
-    Result<void> tick() override;
+    std::expected<void, std::string> tick() override;
 
     InferenceConfig config_;
     YouOnlyLookOnce yolo_;

@@ -1,5 +1,7 @@
 cmake_minimum_required(VERSION 3.16.0)
 project(pallas-cpp)
+
+set(DEV_MODULE Development)
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 # set(CMAKE_BUILD_TYPE Debug)
@@ -8,40 +10,63 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 message("${PROJECT_SOURCE_DIR}/.cmake")
 set(CMAKE_MODULE_PATH "${PROJECT_SOURCE_DIR}/.cmake" ${CMAKE_MODULE_PATH})
 
+find_package(Python 3.12 COMPONENTS Interpreter ${DEV_MODULE} REQUIRED)
+# Detect the installed nanobind package and import it into CMake
+execute_process(
+  COMMAND "${Python_EXECUTABLE}" -m nanobind --cmake_dir
+  OUTPUT_STRIP_TRAILING_WHITESPACE OUTPUT_VARIABLE nanobind_ROOT)
+find_package(nanobind CONFIG REQUIRED)
 find_package(OpenCV REQUIRED)
 find_package(spdlog REQUIRED)
 find_package(onnxruntime REQUIRED)
-find_package(ftxui REQUIRED)
 
 # Nix version of spdlog
 add_compile_definitions(SPDLOG_FMT_EXTERNAL)
 
-# -- Libraries --
+# -- Core Library --
 add_library(core STATIC
-  src/core/sam.cc    
+  src/core/logger.cc
   src/core/service.cc
   src/core/timer.cc
-  src/core/yolo.cc
-  src/core/yolo_utils.cc        
 )
-
 target_include_directories(core PUBLIC
   ${CMAKE_CURRENT_LIST_DIR}/include
-  ${OpenCV_INCLUDE_DIRS}
-  # ${ONNXRUNTIME_ROOT_DIR}/include
-    PRIVATE ${CMAKE_CURRENT_LIST_DIR}/src
+  PRIVATE ${CMAKE_CURRENT_LIST_DIR}/src
 )
-target_link_libraries(core PRIVATE onnxruntime ${OpenCV_LIBS} spdlog::spdlog)
+target_link_libraries(core PRIVATE spdlog::spdlog)
+
+# -- Vision Library --
+add_library(vision STATIC
+  src/vision/detection.cc
+  src/vision/geometry.cc
+  src/vision/sam.cc      
+  src/vision/yolo.cc
+  src/vision/yolo_utils.cc          
+)
+
+target_include_directories(vision PUBLIC
+  ${CMAKE_CURRENT_LIST_DIR}/include
+  ${OpenCV_INCLUDE_DIRS}
+  PRIVATE ${CMAKE_CURRENT_LIST_DIR}/src
+)
+target_link_libraries(vision PRIVATE core onnxruntime ${OpenCV_LIBS})
+
+# -- Vision Python Bindings --
+nanobind_add_module(pallas_py
+  bindings/geometry.cc
+)
+
+target_link_libraries(pallas_py PRIVATE core vision)
 
 # -- Executables: Services --
 add_executable(psystreamd
   process/psystreamd.cc
-  src/service/inference_service.cc        
+  src/service/inference_service.cc
 )
 target_include_directories(psystreamd PRIVATE
     ${CMAKE_CURRENT_LIST_DIR}/src
-  )
-  target_link_libraries(psystreamd PUBLIC core)
+)
+target_link_libraries(psystreamd PUBLIC core vision)
   
 add_executable(starburstd
   process/starburstd.cc
@@ -49,8 +74,8 @@ add_executable(starburstd
 )
 target_include_directories(starburstd PRIVATE
     ${CMAKE_CURRENT_LIST_DIR}/src
-  )
-  target_link_libraries(starburstd PUBLIC core)
+)
+target_link_libraries(starburstd PUBLIC core ${OpenCV_LIBS})
 
 add_executable(starforged
   process/starforged.cc
@@ -58,22 +83,24 @@ add_executable(starforged
 )
 target_include_directories(starforged PRIVATE
   ${CMAKE_CURRENT_LIST_DIR}/src  
-  )
-  target_link_libraries(starforged PUBLIC core
-    PRIVATE ftxui::screen ftxui::dom ftxui::component)  
+)
+target_link_libraries(starforged PUBLIC core PRIVATE ${OpenCV_LIBS})    
 
-  # -- Executables: Tests --
-  add_executable(core-tests
+# -- Executables: Tests --
+
+add_executable(unit-tests
+    test/main_test.cc  
     test/core/mat_queue_tests.cc
-    test/core/sam_tests.cc
-    test/core/yolo_tests.cc        
-    test/main_test.cc
+    test/core/spmc_mat_queue_tests.cc
+    test/vision/geometry_tests.cc    
+    test/vision/sam_tests.cc
+    test/vision/yolo_tests.cc        
 )    
-target_include_directories(core-tests PRIVATE
+target_include_directories(unit-tests PRIVATE
   ${CMAKE_CURRENT_LIST_DIR}/src
-    ${CMAKE_CURRENT_LIST_DIR}/test  
-  )
-  target_link_libraries(core-tests PUBLIC core gtest)
+  ${CMAKE_CURRENT_LIST_DIR}/test  
+)
+target_link_libraries(unit-tests PUBLIC core vision gtest)  
 
 
 # -- Install --

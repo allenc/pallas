@@ -6,6 +6,8 @@
 #include <iostream>
 #include <list>
 #include <opencv2/core.hpp>
+#include <string>
+#include <vector>
 
 // https://github.com/ryouchinsa/sam-cpp-macos
 

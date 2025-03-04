@@ -1,13 +1,14 @@
 #pragma once
 
-#include <core/mat_queue.h>
-#include <core/result.h>
 #include <core/service.h>
 
+#include <expected>
 #include <memory>
 #include <string>
 #include <unordered_map>
 #include <vector>
+
+#include "mat_queue.h"
 
 namespace pallas {
 
@@ -25,7 +26,7 @@ class ViewerService : public Service {
     void stop() override;
 
    protected:
-    Result<bool> tick() override;
+    std::expected<void, std::string> tick() override;
 
    private:
     std::vector<std::string> shared_memory_names_;

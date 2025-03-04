@@ -1,7 +1,7 @@
 #include <core/logger.h>
-#include <core/sam.h>
 #include <core/timer.h>
 #include <gtest/gtest.h>
+#include <vision/sam.h>
 
 #include <opencv2/core.hpp>
 #include <opencv2/imgcodecs.hpp>
@@ -32,8 +32,7 @@ TEST_F(SegmentAnythingTests, Beep) {
     const cv::Size sam_size = sam.getInputSize();
     LOGI("sam size w {} h {}", sam_size.width, sam_size.height);
     cv::resize(image, image, sam.getInputSize());
-    const Timer timer;
-    timer.start("sam preprocess");
+    Timer timer{"sam preprocess"};
     EXPECT_TRUE(sam.preprocessImage(image));
     timer.log_ms("sam preprocess");
 

@@ -1,11 +1,10 @@
 #pragma once
 #include <atomic>
 #include <chrono>
+#include <expected>
 #include <sstream>
 #include <string>
 #include <thread>
-
-#include "core/result.h"
 
 namespace pallas {
 
@@ -26,7 +25,7 @@ class Service {
     virtual void stop();
 
    protected:
-    virtual Result<void> tick() = 0;
+    virtual std::expected<void, std::string> tick() = 0;
 
    private:
     std::thread thread_;

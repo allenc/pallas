@@ -16,7 +16,7 @@ namespace pallas {
  */
 class Timer {
    public:
-    Timer();
+    Timer(const std::string& name = "");
     void start(const std::string& name);
     double elapsed_ms(const std::string& name) const;
     void log_ms(const std::string& name, const std::string& message = "") const;
