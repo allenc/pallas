@@ -5,10 +5,10 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+#include <array>
 #include <atomic>
 #include <cassert>
 #include <cstring>
-#include <array>
 #include <opencv2/core.hpp>
 #include <string>
 
@@ -48,7 +48,7 @@ class MultiConsumerMatQueue {
         cv::Mat continuous = mat.isContinuous() ? mat : mat.clone();
         size_t data_size = continuous.total() * continuous.elemSize();
         MatHeader mat_header{continuous.rows, continuous.cols,
-                            continuous.type(), data_size};
+                             continuous.type(), data_size};
         size_t total_mat_size = sizeof(MatHeader) + data_size;
 
         if (total_mat_size > header_->capacity) return false;
@@ -58,7 +58,8 @@ class MultiConsumerMatQueue {
         }
 
         std::memcpy(buffer_ + position, &mat_header, sizeof(MatHeader));
-        std::memcpy(buffer_ + position + sizeof(MatHeader), continuous.data, data_size);
+        std::memcpy(buffer_ + position + sizeof(MatHeader), continuous.data,
+                    data_size);
         std::atomic_thread_fence(std::memory_order_seq_cst);
 
         return true;
@@ -92,24 +93,25 @@ class MultiConsumerMatQueue {
 
         return sizeof(MatHeader) + mat_header.data_size;
     }
-    
+
     void update_min_read_pos() {
         size_t min_pos = header_->write_pos.load(std::memory_order_acquire);
         bool has_consumers = false;
-        
+
         for (size_t i = 0; i < MAX_CONSUMERS; i++) {
             if (header_->consumer_active[i].load(std::memory_order_acquire)) {
                 has_consumers = true;
-                size_t pos = header_->read_positions[i].load(std::memory_order_acquire);
+                size_t pos =
+                    header_->read_positions[i].load(std::memory_order_acquire);
                 if (pos < min_pos) min_pos = pos;
             }
         }
-        
+
         if (has_consumers) {
             header_->min_read_pos.store(min_pos, std::memory_order_release);
         }
     }
-    
+
     void acquire_registration_lock() {
         int expected = 0;
         while (!header_->registration_lock.compare_exchange_weak(
@@ -118,16 +120,17 @@ class MultiConsumerMatQueue {
             std::this_thread::yield();
         }
     }
-    
+
     void release_registration_lock() {
         header_->registration_lock.store(0, std::memory_order_release);
     }
 
    public:
-    static MultiConsumerMatQueue Create(const std::string& queue_name, size_t frame_count) {
+    static MultiConsumerMatQueue Create(const std::string& queue_name,
+                                        size_t frame_count) {
         // First close any existing queue with this name
         shm_unlink(queue_name.c_str());
-        
+
         MultiConsumerMatQueue queue;
         queue.name_ = queue_name;
         size_t page_size = sysconf(_SC_PAGE_SIZE);
@@ -155,88 +158,103 @@ class MultiConsumerMatQueue {
         queue.header_ = static_cast<QueueHeader*>(queue.mapped_memory_);
         queue.buffer_ =
             static_cast<uint8_t*>(queue.mapped_memory_) + sizeof(QueueHeader);
-        
+
         // Initialize header with atomic values
         new (queue.header_) QueueHeader();
         queue.header_->write_pos.store(0, std::memory_order_relaxed);
         queue.header_->min_read_pos.store(0, std::memory_order_relaxed);
         queue.header_->capacity = buffer_size;
         queue.header_->registration_lock.store(0, std::memory_order_relaxed);
-        
+
         for (size_t i = 0; i < MAX_CONSUMERS; i++) {
-            queue.header_->read_positions[i].store(0, std::memory_order_relaxed);
-            queue.header_->was_overwritten[i].store(false, std::memory_order_relaxed);
-            queue.header_->consumer_active[i].store(false, std::memory_order_relaxed);
+            queue.header_->read_positions[i].store(0,
+                                                   std::memory_order_relaxed);
+            queue.header_->was_overwritten[i].store(false,
+                                                    std::memory_order_relaxed);
+            queue.header_->consumer_active[i].store(false,
+                                                    std::memory_order_relaxed);
         }
-        
+
         return queue;
     }
-    
+
     int register_consumer() {
         if (!is_valid()) return -1;
-        
+
         acquire_registration_lock();
-        
+
         int assigned_id = -1;
         for (int i = 0; i < MAX_CONSUMERS; i++) {
             if (!header_->consumer_active[i].load(std::memory_order_acquire)) {
                 // Set read position to current write position
-                // This ensures the consumer only sees frames pushed after registration
-                size_t initial_pos = header_->write_pos.load(std::memory_order_acquire);
-                
-                header_->consumer_active[i].store(true, std::memory_order_release);
-                header_->read_positions[i].store(initial_pos, std::memory_order_release);
-                header_->was_overwritten[i].store(false, std::memory_order_release);
+                // This ensures the consumer only sees frames pushed after
+                // registration
+                size_t initial_pos =
+                    header_->write_pos.load(std::memory_order_acquire);
+
+                header_->consumer_active[i].store(true,
+                                                  std::memory_order_release);
+                header_->read_positions[i].store(initial_pos,
+                                                 std::memory_order_release);
+                header_->was_overwritten[i].store(false,
+                                                  std::memory_order_release);
                 assigned_id = i;
                 break;
             }
         }
-        
+
         if (assigned_id >= 0) {
             consumer_id_ = assigned_id;
             update_min_read_pos();
         }
-        
+
         release_registration_lock();
         return assigned_id;
     }
-    
+
     bool unregister_consumer() {
-        if (!is_valid() || consumer_id_ < 0 || consumer_id_ >= MAX_CONSUMERS) 
+        if (!is_valid() || consumer_id_ < 0 || consumer_id_ >= MAX_CONSUMERS)
             return false;
-            
+
         acquire_registration_lock();
-        
-        header_->consumer_active[consumer_id_].store(false, std::memory_order_release);
+
+        header_->consumer_active[consumer_id_].store(false,
+                                                     std::memory_order_release);
         update_min_read_pos();
         consumer_id_ = -1;
-        
+
         release_registration_lock();
         return true;
     }
 
     bool try_pop(cv::Mat& result) {
-        if (!is_valid() || consumer_id_ < 0 || consumer_id_ >= MAX_CONSUMERS) 
+        if (!is_valid() || consumer_id_ < 0 || consumer_id_ >= MAX_CONSUMERS)
             return false;
-            
-        if (!header_->consumer_active[consumer_id_].load(std::memory_order_acquire))
+
+        if (!header_->consumer_active[consumer_id_].load(
+                std::memory_order_acquire))
             return false;
-            
-        size_t read_pos = header_->read_positions[consumer_id_].load(std::memory_order_acquire);
+
+        size_t read_pos = header_->read_positions[consumer_id_].load(
+            std::memory_order_acquire);
         size_t write_pos = header_->write_pos.load(std::memory_order_acquire);
-        bool was_overwritten = header_->was_overwritten[consumer_id_].load(std::memory_order_acquire);
-        
-        // Nothing to read if read position equals write position and no overwrite occurred
+        bool was_overwritten = header_->was_overwritten[consumer_id_].load(
+            std::memory_order_acquire);
+
+        // Nothing to read if read position equals write position and no
+        // overwrite occurred
         if (read_pos == write_pos && !was_overwritten) return false;
-        
+
         if (read_pos >= header_->capacity) read_pos = 0;
-        
+
         std::atomic_thread_fence(std::memory_order_acquire);
         size_t entry_size = get_entry_size(read_pos);
         if (entry_size == 0 || entry_size > header_->capacity) {
             // If we can't get a valid entry size, move to the write position
-            header_->read_positions[consumer_id_].store(write_pos, std::memory_order_release);
-            header_->was_overwritten[consumer_id_].store(false, std::memory_order_release);
+            header_->read_positions[consumer_id_].store(
+                write_pos, std::memory_order_release);
+            header_->was_overwritten[consumer_id_].store(
+                false, std::memory_order_release);
             return false;
         }
 
@@ -245,34 +263,42 @@ class MultiConsumerMatQueue {
             read_pos = 0;
             entry_size = get_entry_size(read_pos);
             if (entry_size == 0 || entry_size > header_->capacity) {
-                header_->read_positions[consumer_id_].store(write_pos, std::memory_order_release);
-                header_->was_overwritten[consumer_id_].store(false, std::memory_order_release);
+                header_->read_positions[consumer_id_].store(
+                    write_pos, std::memory_order_release);
+                header_->was_overwritten[consumer_id_].store(
+                    false, std::memory_order_release);
                 return false;
             }
         }
-        
+
         if (!read_from_queue(result, read_pos)) {
-            header_->read_positions[consumer_id_].store(write_pos, std::memory_order_release);
-            header_->was_overwritten[consumer_id_].store(false, std::memory_order_release);
+            header_->read_positions[consumer_id_].store(
+                write_pos, std::memory_order_release);
+            header_->was_overwritten[consumer_id_].store(
+                false, std::memory_order_release);
             return false;
         }
-        
+
         if (result.empty()) {
-            header_->read_positions[consumer_id_].store(write_pos, std::memory_order_release);
-            header_->was_overwritten[consumer_id_].store(false, std::memory_order_release);
+            header_->read_positions[consumer_id_].store(
+                write_pos, std::memory_order_release);
+            header_->was_overwritten[consumer_id_].store(
+                false, std::memory_order_release);
             return false;
         }
 
         // Reset overwritten flag after successful read
         if (was_overwritten) {
-            header_->was_overwritten[consumer_id_].store(false, std::memory_order_release);
+            header_->was_overwritten[consumer_id_].store(
+                false, std::memory_order_release);
         }
-        
+
         // Update read position
         size_t next_pos = (read_pos + entry_size) % header_->capacity;
         std::atomic_thread_fence(std::memory_order_seq_cst);
-        header_->read_positions[consumer_id_].store(next_pos, std::memory_order_release);
-        
+        header_->read_positions[consumer_id_].store(next_pos,
+                                                    std::memory_order_release);
+
         // Occasionally update min read position to prevent excessive contention
         if (rand() % 5 == 0) {
             update_min_read_pos();
@@ -309,8 +335,10 @@ class MultiConsumerMatQueue {
         if (!is_valid() || mat.empty()) return false;
 
         size_t write_pos = header_->write_pos.load(std::memory_order_acquire);
-        size_t min_read_pos = header_->min_read_pos.load(std::memory_order_acquire);
-        size_t required_space = sizeof(MatHeader) + mat.total() * mat.elemSize();
+        size_t min_read_pos =
+            header_->min_read_pos.load(std::memory_order_acquire);
+        size_t required_space =
+            sizeof(MatHeader) + mat.total() * mat.elemSize();
 
         // Calculate available space
         size_t available_space =
@@ -320,7 +348,7 @@ class MultiConsumerMatQueue {
 
         // If not enough space, buffer will be overwritten
         bool overwriting = required_space >= available_space;
-        
+
         // Handle buffer wrap-around
         bool wrapping = false;
         size_t remaining_space = header_->capacity - write_pos;
@@ -334,16 +362,19 @@ class MultiConsumerMatQueue {
         // Update write position
         size_t next_pos = (write_pos + required_space) % header_->capacity;
         std::atomic_thread_fence(std::memory_order_seq_cst);
-        
-        // Set overwritten flag for all active consumers if wrapping or overwriting
+
+        // Set overwritten flag for all active consumers if wrapping or
+        // overwriting
         if (wrapping || overwriting) {
             for (size_t i = 0; i < MAX_CONSUMERS; i++) {
-                if (header_->consumer_active[i].load(std::memory_order_acquire)) {
-                    header_->was_overwritten[i].store(true, std::memory_order_release);
+                if (header_->consumer_active[i].load(
+                        std::memory_order_acquire)) {
+                    header_->was_overwritten[i].store(
+                        true, std::memory_order_release);
                 }
             }
         }
-        
+
         header_->write_pos.store(next_pos, std::memory_order_release);
         return true;
     }
@@ -353,9 +384,9 @@ class MultiConsumerMatQueue {
     }
 
     size_t size() const { return total_size_; }
-    
+
     int get_consumer_id() const { return consumer_id_; }
-    
+
     bool is_consumer() const { return consumer_id_ >= 0; }
 };
 }  // namespace pallas

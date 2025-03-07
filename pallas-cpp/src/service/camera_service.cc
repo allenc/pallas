@@ -66,7 +66,7 @@ std::expected<void, std::string> CameraService::tick() {
         return std::unexpected("Failed to push frame on tick.");
     }
 
-    if (true)  // Write frames as images
+    if (false)  // Write frames as images
     {
         static int frame_idx{0};
         std::string filename =

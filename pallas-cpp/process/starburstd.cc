@@ -14,7 +14,7 @@ int main() {
 
   camera_service.start();
 
-  std::this_thread::sleep_for(std::chrono::seconds(30));
+  std::this_thread::sleep_for(std::chrono::seconds(300));
   camera_service.stop();
 
   return 0;

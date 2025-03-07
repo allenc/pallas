@@ -1,0 +1,385 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Orca Command</title>
+    <style>
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            margin: 0;
+            padding: 0;
+            background-color: #1e1e1e;
+            color: #f0f0f0;
+            display: flex;
+            flex-direction: column;
+            height: 100vh;
+            overflow: hidden;
+        }
+        header {
+            background-color: #333;
+            color: white;
+            padding: 1rem;
+            display: flex;
+            justify-content: flex-start;
+            align-items: center;
+            height: 60px;
+            box-sizing: border-box;
+        }
+        .logo {
+            font-size: 1.5rem;
+            font-weight: bold;
+            text-transform: uppercase;
+            margin: 0;
+        }
+        .main-container {
+            display: flex;
+            flex: 1;
+            overflow: hidden;
+        }
+        .sidebar {
+            width: 300px;
+            background-color: #252525;
+            padding: 1rem;
+            overflow-y: auto;
+            display: flex;
+            flex-direction: column;
+            border-right: 1px solid #3a3a3a;
+        }
+        .camera-selector {
+            margin-bottom: 20px;
+        }
+        select {
+            width: 100%;
+            padding: 8px;
+            background-color: #3a3a3a;
+            color: #f0f0f0;
+            border: 1px solid #555;
+            border-radius: 4px;
+            font-size: 14px;
+        }
+        .camera-info {
+            flex: 1;
+        }
+        .camera-info-item {
+            margin-bottom: 15px;
+        }
+        .camera-info-label {
+            font-weight: bold;
+            margin-bottom: 5px;
+            color: #aaa;
+            font-size: 0.9rem;
+        }
+        .camera-info-value {
+            font-size: 1rem;
+        }
+        .main-content {
+            flex: 1;
+            padding: 1rem;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            overflow: hidden;
+            background-color: #000;
+        }
+        .camera-feed {
+            position: relative;
+            max-width: 100%;
+            max-height: 100%;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+        }
+        .camera-feed img {
+            max-width: 100%;
+            max-height: 100%;
+            object-fit: contain;
+        }
+        .detection-box {
+            position: absolute;
+            border: 2px solid;
+            background-color: rgba(255, 255, 255, 0.1);
+            pointer-events: none;
+        }
+        .detection-label {
+            position: absolute;
+            top: -25px;
+            left: 0;
+            padding: 2px 6px;
+            font-size: 12px;
+            color: white;
+            white-space: nowrap;
+        }
+        .type-person {
+            border-color: #4CAF50;
+        }
+        .type-person .detection-label {
+            background-color: #4CAF50;
+        }
+        .type-vehicle {
+            border-color: #2196F3;
+        }
+        .type-vehicle .detection-label {
+            background-color: #2196F3;
+        }
+        .type-animal {
+            border-color: #FF9800;
+        }
+        .type-animal .detection-label {
+            background-color: #FF9800;
+        }
+        .type-unknown {
+            border-color: #9E9E9E;
+        }
+        .type-unknown .detection-label {
+            background-color: #9E9E9E;
+        }
+    </style>
+</head>
+<body>
+    <header>
+        <h1 class="logo">Orca Command</h1>
+    </header>
+    
+    <div class="main-container">
+        <div class="sidebar">
+            <div class="camera-selector">
+                <div class="camera-info-label">Select Camera</div>
+                <select id="camera-select">
+                    <!-- Camera options will be inserted here -->
+                </select>
+            </div>
+            
+            <div class="camera-info">
+                <div class="camera-info-item">
+                    <div class="camera-info-label">Location</div>
+                    <div class="camera-info-value" id="camera-location">-</div>
+                </div>
+                
+                <div class="camera-info-item">
+                    <div class="camera-info-label">Status</div>
+                    <div class="camera-info-value" id="camera-status">-</div>
+                </div>
+                
+                <div class="camera-info-item">
+                    <div class="camera-info-label">Resolution</div>
+                    <div class="camera-info-value" id="camera-resolution">-</div>
+                </div>
+                
+                <div class="camera-info-item">
+                    <div class="camera-info-label">Last Update</div>
+                    <div class="camera-info-value" id="camera-timestamp">-</div>
+                </div>
+                
+                <div class="camera-info-item">
+                    <div class="camera-info-label">Detections</div>
+                    <div class="camera-info-value" id="camera-detections">-</div>
+                </div>
+            </div>
+        </div>
+        
+        <div class="main-content">
+            <div class="camera-feed">
+                <img id="camera-image" src="data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7" alt="Camera feed">
+                <div id="detection-overlays"></div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // Configuration
+        const API_PORT = 8080;
+        
+        // Use localhost instead of IP for better compatibility
+        const API_BASE = `http://localhost:${API_PORT}`;
+        
+        // For debugging
+        console.log("API base URL:", API_BASE);
+        const UPDATE_INTERVAL = 500; // 0.5 seconds
+        
+        // State
+        let cameras = [];
+        let currentCameraId = null;
+        
+        // Initialize
+        document.addEventListener('DOMContentLoaded', initialize);
+        
+        async function initialize() {
+            try {
+                // Fetch camera list
+                await fetchCameras();
+                
+                // Set up camera selection dropdown
+                setupCameraSelector();
+                
+                // Start updating the selected camera
+                setInterval(updateCurrentCamera, UPDATE_INTERVAL);
+            } catch (error) {
+                console.error('Initialization error:', error);
+            }
+        }
+        
+        async function fetchCameras() {
+            try {
+                // In a real implementation, fetch from the server
+                const response = await fetch(`${API_BASE}/api/cameras`);
+                if (response.ok) {
+                    const data = await response.json();
+                    cameras = data.cameras || [];
+                } else {
+                    // Fallback to mock data if API not available
+                    cameras = [
+                        { id: 'camera-1', name: 'Front Door', location: 'Entrance', online: true },
+                        { id: 'camera-2', name: 'Backyard', location: 'Rear', online: true },
+                        { id: 'camera-3', name: 'Garage', location: 'Driveway', online: false }
+                    ];
+                }
+            } catch (error) {
+                // Fallback to mock data if API call fails
+                cameras = [
+                    { id: 'camera-1', name: 'Front Door', location: 'Entrance', online: true },
+                    { id: 'camera-2', name: 'Backyard', location: 'Rear', online: true },
+                    { id: 'camera-3', name: 'Garage', location: 'Driveway', online: false }
+                ];
+            }
+            
+            // Set the first camera as default
+            if (cameras.length > 0) {
+                currentCameraId = cameras[0].id;
+            }
+            
+            return cameras;
+        }
+        
+        function setupCameraSelector() {
+            const select = document.getElementById('camera-select');
+            
+            // Add options
+            cameras.forEach(camera => {
+                const option = document.createElement('option');
+                option.value = camera.id;
+                option.textContent = camera.name;
+                option.disabled = !camera.online;
+                select.appendChild(option);
+            });
+            
+            // Set initial value
+            if (currentCameraId) {
+                select.value = currentCameraId;
+            }
+            
+            // Handle selection change
+            select.addEventListener('change', (event) => {
+                currentCameraId = event.target.value;
+                updateCameraInfo();
+                updateCameraImage();
+            });
+            
+            // Initial update
+            updateCameraInfo();
+        }
+        
+        function updateCameraInfo() {
+            const camera = cameras.find(c => c.id === currentCameraId);
+            if (!camera) return;
+            
+            document.getElementById('camera-location').textContent = camera.location;
+            document.getElementById('camera-status').textContent = camera.online ? 'Online' : 'Offline';
+        }
+        
+        async function updateCurrentCamera() {
+            if (!currentCameraId) return;
+            
+            updateCameraImage();
+        }
+        
+        function updateCameraImage() {
+            const camera = cameras.find(c => c.id === currentCameraId);
+            if (!camera || !camera.online) return;
+            
+            const img = document.getElementById('camera-image');
+            
+            // Add a timestamp to prevent caching
+            const timestamp = Date.now();
+            const frameUrl = `${API_BASE}/api/cameras/${currentCameraId}/frame?_=${timestamp}`;
+            
+            console.log("Fetching frame from:", frameUrl);
+            
+            // Use fetch to get image and handle errors
+            fetch(frameUrl)
+                .then(response => {
+                    if (!response.ok) {
+                        console.error("Error fetching frame:", response.status, response.statusText);
+                        throw new Error(`HTTP error! Status: ${response.status}`);
+                    }
+                    return response.blob();
+                })
+                .then(blob => {
+                    const objectUrl = URL.createObjectURL(blob);
+                    img.src = objectUrl;
+                    console.log("Loaded frame, size:", blob.size, "bytes");
+                    
+                    // Update timestamp
+                    const now = new Date();
+                    document.getElementById('camera-timestamp').textContent = now.toLocaleTimeString();
+                })
+                .catch(error => {
+                    console.error("Error loading frame:", error);
+                    // If we can't load the frame, show an error message
+                    if (!img.dataset.errorShown) {
+                        img.dataset.errorShown = "true";
+                        const errorMessage = document.createElement('div');
+                        errorMessage.textContent = "Error loading camera feed";
+                        errorMessage.style.color = "red";
+                        img.parentNode.appendChild(errorMessage);
+                    }
+                });
+            
+            // In a real implementation, we would fetch detection data separately
+            // and update the overlay
+            updateDetectionOverlay([
+                { type: 'person', confidence: 0.94, boundingBox: { x: 0.2, y: 0.3, width: 0.1, height: 0.2 } },
+                { type: 'vehicle', confidence: 0.87, boundingBox: { x: 0.6, y: 0.5, width: 0.2, height: 0.1 } }
+            ]);
+            
+            // Update resolution when image is loaded
+            img.onload = () => {
+                document.getElementById('camera-resolution').textContent = 
+                    `${img.naturalWidth} � ${img.naturalHeight}`;
+            };
+        }
+        
+        function updateDetectionOverlay(detections) {
+            const overlayContainer = document.getElementById('detection-overlays');
+            const img = document.getElementById('camera-image');
+            
+            // Clear previous overlays
+            overlayContainer.innerHTML = '';
+            
+            // Update detection count
+            document.getElementById('camera-detections').textContent = 
+                detections.length > 0 ? `${detections.length} detected` : 'None';
+            
+            // Add detection overlays
+            // In a real implementation, these would be positioned correctly
+            // based on the bounding box coordinates
+            detections.forEach(detection => {
+                // Create the detection box
+                const box = document.createElement('div');
+                box.className = `detection-box type-${detection.type}`;
+                
+                // Positioning logic would need to account for image scaling
+                // For now, we'll skip this part
+                
+                // Create the label
+                const label = document.createElement('div');
+                label.className = 'detection-label';
+                label.textContent = `${detection.type} ${Math.round(detection.confidence * 100)}%`;
+                
+                box.appendChild(label);
+                overlayContainer.appendChild(box);
+            });
+        }
+    </script>
+</body>
+</html>

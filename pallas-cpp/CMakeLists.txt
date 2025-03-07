@@ -4,8 +4,8 @@ project(pallas-cpp)
 set(DEV_MODULE Development)
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
-# set(CMAKE_BUILD_TYPE Debug)
-# set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} -g")
+set(CMAKE_BUILD_TYPE Debug)
+set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} -g")
 
 message("${PROJECT_SOURCE_DIR}/.cmake")
 set(CMAKE_MODULE_PATH "${PROJECT_SOURCE_DIR}/.cmake" ${CMAKE_MODULE_PATH})
@@ -22,6 +22,43 @@ find_package(onnxruntime REQUIRED)
 
 # Nix version of spdlog
 add_compile_definitions(SPDLOG_FMT_EXTERNAL)
+
+# Using Mongoose for HTTP server
+set(MONGOOSE_INCLUDE_DIR "${CMAKE_CURRENT_BINARY_DIR}/mongoose_include")
+file(MAKE_DIRECTORY ${MONGOOSE_INCLUDE_DIR})
+
+if(NOT EXISTS "${MONGOOSE_INCLUDE_DIR}/mongoose.h" OR NOT EXISTS "${MONGOOSE_INCLUDE_DIR}/mongoose.c")
+    message(STATUS "Downloading Mongoose library")
+    file(DOWNLOAD
+        "https://raw.githubusercontent.com/cesanta/mongoose/master/mongoose.h"
+        "${MONGOOSE_INCLUDE_DIR}/mongoose.h"
+        SHOW_PROGRESS
+        TLS_VERIFY ON
+    )
+    file(DOWNLOAD
+        "https://raw.githubusercontent.com/cesanta/mongoose/master/mongoose.c"
+        "${MONGOOSE_INCLUDE_DIR}/mongoose.c"
+        SHOW_PROGRESS
+        TLS_VERIFY ON
+    )
+endif()
+
+# Download JSON library if not found
+set(JSON_INCLUDE_DIR "${CMAKE_CURRENT_BINARY_DIR}/json_include")
+file(MAKE_DIRECTORY ${JSON_INCLUDE_DIR}/nlohmann)
+
+if(NOT EXISTS "${JSON_INCLUDE_DIR}/nlohmann/json.hpp")
+    message(STATUS "Downloading nlohmann/json.hpp")
+    file(DOWNLOAD
+        "https://github.com/nlohmann/json/releases/download/v3.11.3/json.hpp"
+        "${JSON_INCLUDE_DIR}/nlohmann/json.hpp"
+        SHOW_PROGRESS
+        TLS_VERIFY ON
+    )
+endif()
+
+message(STATUS "Using Mongoose from: ${MONGOOSE_INCLUDE_DIR}")
+message(STATUS "Using nlohmann_json from: ${JSON_INCLUDE_DIR}")
 
 # -- Core Library --
 add_library(core STATIC
@@ -86,6 +123,27 @@ target_include_directories(starforged PRIVATE
 )
 target_link_libraries(starforged PUBLIC core PRIVATE ${OpenCV_LIBS})    
 
+# New stream service with HTTP server
+add_executable(streamd
+  process/streamd.cc
+  src/service/stream_service.cc
+  ${MONGOOSE_INCLUDE_DIR}/mongoose.c
+)
+target_include_directories(streamd PRIVATE
+  ${CMAKE_CURRENT_LIST_DIR}/src
+  ${MONGOOSE_INCLUDE_DIR}
+  ${JSON_INCLUDE_DIR}
+)
+target_link_libraries(streamd PUBLIC
+  core
+  ${OpenCV_LIBS}
+  pthread
+)
+# Define MG_ENABLE_OPENSSL=0 to disable OpenSSL
+target_compile_definitions(streamd PRIVATE 
+    MG_ENABLE_OPENSSL=0
+)
+
 # -- Executables: Tests --
 
 add_executable(unit-tests
@@ -106,6 +164,7 @@ target_link_libraries(unit-tests PUBLIC core vision gtest)
 # -- Install --
 install(TARGETS core LIBRARY DESTINATION lib)
 install(DIRECTORY "${CMAKE_SOURCE_DIR}/include/core" DESTINATION include FILES_MATCHING PATTERN "*.h")
+install(DIRECTORY "${CMAKE_SOURCE_DIR}/frontend/" DESTINATION share/pallas/frontend)
 
 # -- Formatting --
 function(add_clang_format_target)

@@ -30,7 +30,9 @@
             expected-lite
             gtest
             onnxruntime
-            capnproto
+            # Switch to a simpler HTTP approach
+            # Let's try Mongoose, which is a single C file
+            # libpthread
             python312 # start of py packages
             python3Packages.nanobind
             python3Packages.opencv4

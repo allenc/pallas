@@ -1,76 +1,174 @@
-@0xc3b829e9f3c2c1a8;  # Unique file ID generated randomly
+syntax = "proto3";
 
-struct Timestamp {
-  seconds @0 :UInt64;  # Seconds since Unix epoch
-  nanoseconds @1 :UInt32;  # Nanosecond precision
+package pallas;
+
+// Use C++11 features
+option cc_enable_arenas = true;
+
+// Timestamp represents a point in time
+message Timestamp {
+  // Seconds since Unix epoch
+  uint64 seconds = 1;
+  // Nanosecond precision
+  uint32 nanoseconds = 2;
 }
 
-struct Time {
-  hour @0 :UInt8;          # 0-23
-  minute @1 :UInt8;        # 0-59
-  second @2 :UInt8;        # 0-59
-  millisecond @3 :UInt16;  # 0-999
-  day @4 :UInt8;           # 1-31
-  month @5 :UInt8;         # 1-12
-  year @6 :UInt16;         # e.g., 2024
+// Point represents a 2D coordinate
+message Point {
+  // Normalized 0-1 within video frame
+  float x = 1;
+  float y = 2;
 }
 
-struct Point {
-  x @0 :Float32;  # Normalized 0-1 within video frame
-  y @1 :Float32;  # Normalized 0-1 within video frame
+// BoundingBox represents a rectangle in the image
+message BoundingBox {
+  // Top-left x coordinate (normalized 0-1)
+  float x = 1;
+  // Top-left y coordinate (normalized 0-1)
+  float y = 2;
+  // Width (normalized 0-1)
+  float width = 3;
+  // Height (normalized 0-1)
+  float height = 4;
 }
 
-struct BoundingBox {
-  x @0 :Float32;  # Top-left x coordinate (normalized 0-1)
-  y @1 :Float32;  # Top-left y coordinate (normalized 0-1)
-  width @2 :Float32;  # Width (normalized 0-1)
-  height @3 :Float32;  # Height (normalized 0-1)
-}
-
+// Types of objects that can be detected
 enum DetectionType {
-  unknown @0;
-  person @1;
-  vehicle @2;
-  animal @3;
+  DETECTION_TYPE_UNKNOWN = 0;
+  DETECTION_TYPE_PERSON = 1;
+  DETECTION_TYPE_VEHICLE = 2;
+  DETECTION_TYPE_ANIMAL = 3;
 }
 
-struct Detection {
-  type @0 :DetectionType;  # Type of detected object
-  bounding_box @1 :BoundingBox;  # Location in the frame
-  confidence @2 :Float32;  # Detection confidence score (0-1)
-  metadata @3 :List(Text);  # Any additional metadata (e.g., "person_name", "authorized")
+// Detection represents an object found in a frame
+message Detection {
+  // Type of detected object
+  DetectionType type = 1;
+  // Location in the frame
+  BoundingBox bounding_box = 2;
+  // Detection confidence score (0-1)
+  float confidence = 3;
+  // Any additional metadata (e.g., "person_name", "authorized")
+  repeated string metadata = 4;
 }
 
-struct Resolution {
-  width @0 :UInt32;
-  height @1 :UInt32;
+// Resolution represents image dimensions
+message Resolution {
+  uint32 width = 1;
+  uint32 height = 2;
 }
 
-struct Image {
-  data @0 :Data;  # Raw image data
-  format @1 :Text;  # Image format (e.g., "jpeg", "png")
+// Image holds the binary data of an image
+message Image {
+  // Raw image data
+  bytes data = 1;
+  // Image format (e.g., "jpeg", "png")
+  string format = 2;
 }
 
-struct Camera {
-  id @0 :Text;      # Unique camera identifier
-  name @1 :Text;    # User-defined camera name
-  online @2 :Bool;  # Is the camera currently connected
-  location @3 :Text;  # User-defined location (e.g., "Front Door")
+// Camera represents a camera device
+message Camera {
+  // Unique camera identifier
+  string id = 1;
+  // User-defined camera name
+  string name = 2;
+  // Is the camera currently connected
+  bool online = 3;
+  // User-defined location (e.g., "Front Door")
+  string location = 4;
 }
 
-struct Frame {
-  image @0 :Image;  # The captured image
-  resolution @1 :Resolution;  # Frame resolution
-  detections @2 :List(Detection);  # List of detections in this frame
-  timestamp @3 :Timestamp;  # When this frame was captured
+// Frame represents a single image capture with metadata
+message Frame {
+  // The captured image
+  Image image = 1;
+  // Frame resolution
+  Resolution resolution = 2;
+  // List of detections in this frame
+  repeated Detection detections = 3;
+  // When this frame was captured
+  Timestamp timestamp = 4;
 }
 
-struct Feed {
-  camera @0 :Camera;  # Camera information
-  frame @1 :Frame;    # Current frame from the camera
+// Feed represents a camera and its current frame
+message Feed {
+  // Camera information
+  Camera camera = 1;
+  // Current frame from the camera
+  Frame frame = 2;
 }
 
-struct VisualizeElements {
-  time @0 :Time;  # Current system time
-  feeds @1 :List(Feed);  # List of camera feeds
+// ListCamerasRequest is sent to retrieve all available cameras
+message ListCamerasRequest {
+}
+
+// ListCamerasResponse contains all available cameras
+message ListCamerasResponse {
+  repeated Camera cameras = 1;
+}
+
+// GetFrameRequest is sent to retrieve the latest frame from a camera
+message GetFrameRequest {
+  string camera_id = 1;
+}
+
+// GetFrameResponse contains the latest frame from a camera
+message GetFrameResponse {
+  Frame frame = 1;
+}
+
+// Event types that can be tracked
+enum EventType {
+  EVENT_TYPE_UNKNOWN = 0;
+  EVENT_TYPE_MOTION = 1;
+  EVENT_TYPE_PERSON_DETECTED = 2;
+  EVENT_TYPE_VEHICLE_DETECTED = 3;
+  EVENT_TYPE_ANIMAL_DETECTED = 4;
+  EVENT_TYPE_CUSTOM_ALERT = 5;
+}
+
+// Event represents a significant occurrence in the security system
+message Event {
+  string id = 1;
+  Timestamp timestamp = 2;
+  string camera_id = 3;
+  EventType type = 4;
+  repeated Detection detections = 5;
+  Frame frame = 6;
+}
+
+// GetEventsRequest is sent to retrieve recent events
+message GetEventsRequest {
+  string camera_id = 1;
+  uint32 count = 2;
+}
+
+// GetEventsResponse contains a list of recent events
+message GetEventsResponse {
+  repeated Event events = 1;
+}
+
+// StreamFramesRequest is sent to start streaming frames from a camera
+message StreamFramesRequest {
+  string camera_id = 1;
+}
+
+// StreamFramesResponse contains a stream of frames from a camera
+message StreamFramesResponse {
+  Frame frame = 1;
+}
+
+// CameraService provides methods to interact with cameras
+service CameraService {
+  // List all available cameras
+  rpc ListCameras(ListCamerasRequest) returns (ListCamerasResponse);
+  
+  // Get the latest frame from a specific camera
+  rpc GetFrame(GetFrameRequest) returns (GetFrameResponse);
+  
+  // Get recent events from a specific camera
+  rpc GetEvents(GetEventsRequest) returns (GetEventsResponse);
+  
+  // Stream frames from a specific camera
+  rpc StreamFrames(StreamFramesRequest) returns (stream StreamFramesResponse);
 }
