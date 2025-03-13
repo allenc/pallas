@@ -1,5 +1,5 @@
 {
-  description = "core-cpp";
+  description = "pallas-cpp";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
@@ -9,7 +9,7 @@
     flake-parts.lib.mkFlake { inherit inputs; } {
 
       # Architectures
-      systems = [ "x86_64-darwin"]; # Mac for now; "x86_64-linux" "aarch64-linux" "aarch64-darwin" 
+      systems = [ "x86_64-linux"]; # Mac for now; "x86_64-linux" "aarch64-linux" "aarch64-darwin" 
       perSystem = { config, self', inputs', pkgs, system, ... }: {
         
         # Override nixpkgs to allow unfree packages
@@ -30,9 +30,6 @@
             expected-lite
             gtest
             onnxruntime
-            # Switch to a simpler HTTP approach
-            # Let's try Mongoose, which is a single C file
-            # libpthread
             python312 # start of py packages
             python3Packages.nanobind
             python3Packages.opencv4

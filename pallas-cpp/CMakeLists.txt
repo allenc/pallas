@@ -96,6 +96,14 @@ nanobind_add_module(pallas_py
 target_link_libraries(pallas_py PRIVATE core vision)
 
 # -- Executables: Services --
+add_executable(ps3
+  src/vision/ps3.cc
+)
+target_include_directories(ps3 PRIVATE
+    ${CMAKE_CURRENT_LIST_DIR}/src
+  )
+target_link_libraries(ps3 PUBLIC core vision)  
+  
 add_executable(psystreamd
   process/psystreamd.cc
   src/service/inference_service.cc
