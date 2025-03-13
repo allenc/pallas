@@ -136,8 +136,10 @@ target_include_directories(streamd PRIVATE
 )
 target_link_libraries(streamd PUBLIC
   core
+  vision
   ${OpenCV_LIBS}
   pthread
+  onnxruntime
 )
 # Define MG_ENABLE_OPENSSL=0 to disable OpenSSL
 target_compile_definitions(streamd PRIVATE 

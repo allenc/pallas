@@ -38,7 +38,7 @@
             overflow: hidden;
         }
         .sidebar {
-            width: 300px;
+            width: 200px; /* Narrower sidebar */
             background-color: #252525;
             padding: 1rem;
             overflow-y: auto;
@@ -73,27 +73,56 @@
         .camera-info-value {
             font-size: 1rem;
         }
+        
+        /* Styles for detection information */
+        #camera-detections {
+            line-height: 1.3;
+        }
+        
+        .detection-details {
+            margin-top: 4px;
+            font-size: 0.85em;
+            color: #aaa;
+            max-height: 150px;
+            overflow-y: auto;
+            background-color: rgba(0, 0, 0, 0.2);
+            padding: 5px;
+            border-radius: 4px;
+        }
+        
+        .detection-item {
+            margin-bottom: 3px;
+            padding-left: 5px;
+            border-left: 2px solid #00a8e8;
+        }
         .main-content {
             flex: 1;
-            padding: 1rem;
+            padding: 0; /* Remove padding to maximize space */
             display: flex;
             justify-content: center;
             align-items: center;
             overflow: hidden;
             background-color: #000;
+            position: relative; /* Needed for absolute positioning of children */
         }
         .camera-feed {
-            position: relative;
-            max-width: 100%;
-            max-height: 100%;
+            position: absolute; /* Position absolutely to fill all available space */
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
             display: flex;
             justify-content: center;
             align-items: center;
+            overflow: hidden; /* Prevent overflow */
         }
         .camera-feed img {
-            max-width: 100%;
-            max-height: 100%;
-            object-fit: contain;
+            min-width: 100%; /* Must cover full width */
+            min-height: 100%; /* Must cover full height */
+            width: auto; /* Allow proportional sizing */
+            height: auto; /* Allow proportional sizing */
+            object-fit: cover; /* Fill the container while maintaining aspect ratio */
+            /* Removed horizontal flip to preserve detection text rendering */
         }
         .detection-box {
             position: absolute;
@@ -195,14 +224,17 @@
         
         // For debugging
         console.log("API base URL:", API_BASE);
-        const UPDATE_INTERVAL = 500; // 0.5 seconds
+        const INFO_UPDATE_INTERVAL = 2000; // 2 seconds for non-critical info updates
         
         // State
         let cameras = [];
         let currentCameraId = null;
+        let streamActive = false;
+        
         
         // Initialize
         document.addEventListener('DOMContentLoaded', initialize);
+        
         
         async function initialize() {
             try {
@@ -212,8 +244,14 @@
                 // Set up camera selection dropdown
                 setupCameraSelector();
                 
-                // Start updating the selected camera
-                setInterval(updateCurrentCamera, UPDATE_INTERVAL);
+                // Start updating camera info periodically (not frames)
+                setInterval(updateCameraInfo, INFO_UPDATE_INTERVAL);
+                
+                // Initial update right away
+                await updateCameraInfo();
+                
+                // Initial camera stream setup
+                setupMjpegStream();
             } catch (error) {
                 console.error('Initialization error:', error);
             }
@@ -272,113 +310,291 @@
             select.addEventListener('change', (event) => {
                 currentCameraId = event.target.value;
                 updateCameraInfo();
-                updateCameraImage();
+                
+                // Update the stream when camera changes
+                if (streamActive) {
+                    stopMjpegStream();
+                }
+                setupMjpegStream();
             });
             
             // Initial update
             updateCameraInfo();
         }
         
-        function updateCameraInfo() {
+        async function getCameraDetails(cameraId) {
+            try {
+                // Ensure we're using the exact URL format the server expects
+                // Check if our URL construction is correct
+                // Ensure the URL exactly matches the pattern expected by the regex on server
+                // The regex should be: /api/cameras/([\w\-]+) to support hyphens
+                // This means we need to have no trailing slashes or query parameters
+                const url = `${API_BASE}/api/cameras/${cameraId}`;
+                
+                // Debug with exact URL format for comparison with server regex
+                console.log("Fetching camera details from:", url);
+                console.log("URL path part:", `/api/cameras/${cameraId}`);
+                
+                const response = await fetch(url);
+                if (!response.ok) {
+                    console.error("Server returned error:", response.status, response.statusText);
+                    throw new Error(`HTTP error! Status: ${response.status}`);
+                }
+                
+                const responseText = await response.text();
+                console.log("Raw response:", responseText);
+                console.log("Response length:", responseText.length);
+                console.log("Response type:", typeof responseText);
+                
+                // Try to parse as JSON
+                try {
+                    const parsed = JSON.parse(responseText);
+                    
+                    // Inspect the parsed object
+                    console.log("Parsed response type:", typeof parsed);
+                    console.log("Is array?", Array.isArray(parsed));
+                    console.log("Keys:", Object.keys(parsed));
+                    
+                    // Check if we're getting API info instead of camera details
+                    if (parsed.status === "running" && parsed.endpoints) {
+                        console.error("SERVER ROUTING ERROR: The server is returning API documentation instead of camera details");
+                        console.error("This indicates the URL is not being matched correctly by the API router");
+                        console.error("The server may need updating to support hyphens in IDs: /api/cameras/([\w\-]+)");
+                        
+                        // Display simple "No detections" message when API routing fails
+                        const detectionsElement = document.getElementById('camera-detections');
+                        if (detectionsElement) {
+                            detectionsElement.textContent = 'No detections';
+                        }
+                    }
+                    
+                    // Specifically check for resolution field
+                    if (parsed.resolution) {
+                        console.log("Resolution object:", parsed.resolution);
+                        console.log("Resolution width:", parsed.resolution.width);
+                        console.log("Resolution height:", parsed.resolution.height);
+                    } else {
+                        console.log("No resolution field in response");
+                    }
+                    
+                    return parsed;
+                } catch (parseError) {
+                    console.error("Failed to parse JSON:", parseError);
+                    return null;
+                }
+            } catch (error) {
+                console.error("Failed to fetch camera details:", error);
+                return null;
+            }
+        }
+        
+        async function updateCameraInfo() {
             const camera = cameras.find(c => c.id === currentCameraId);
             if (!camera) return;
             
             document.getElementById('camera-location').textContent = camera.location;
             document.getElementById('camera-status').textContent = camera.online ? 'Online' : 'Offline';
-        }
-        
-        async function updateCurrentCamera() {
-            if (!currentCameraId) return;
             
-            updateCameraImage();
+            // No special UI handling for camera IDs with hyphens
+            // We silently try to handle all camera IDs the same way
+            
+            try {
+                // Get camera details from API
+                const cameraInfo = await getCameraDetails(currentCameraId);
+                console.log("Camera info received:", JSON.stringify(cameraInfo, null, 2));
+                
+                // Process camera info to extract resolution
+                if (cameraInfo) {
+                    console.log("Camera info keys:", Object.keys(cameraInfo));
+                    
+                    // Check for resolution in the response
+                    if (cameraInfo.resolution && 
+                        typeof cameraInfo.resolution.width !== 'undefined' && 
+                        typeof cameraInfo.resolution.height !== 'undefined') {
+                        
+                        // Update resolution from API
+                        document.getElementById('camera-resolution').textContent = 
+                            `${cameraInfo.resolution.width} × ${cameraInfo.resolution.height}`;
+                        console.log("Updated resolution from API");
+                    } else {
+                        // Fallback to hardcoded resolution
+                        console.log("No resolution in camera info, using hardcoded value");
+                        document.getElementById('camera-resolution').textContent = '1280 × 720';
+                    }
+                } else {
+                    // No camera info received
+                    console.log("No camera info received, using hardcoded value");
+                    document.getElementById('camera-resolution').textContent = '1280 × 720';
+                }
+            } catch (error) {
+                // Error handling
+                console.error("Error updating camera info:", error);
+                document.getElementById('camera-resolution').textContent = 'Error';
+            }
+            
+            // Update timestamp
+            const now = new Date();
+            document.getElementById('camera-timestamp').textContent = now.toLocaleTimeString();
+            
+            try {
+                // Get camera details for detection info, but handle the case when it's not available
+                const cameraDetails = await getCameraDetails(currentCameraId);
+                
+                // Print the entire camera details for debugging
+                console.log("Camera details response:", JSON.stringify(cameraDetails, null, 2));
+                
+                // Check if we got the API info instead of camera details
+                if (cameraDetails && cameraDetails.status === "running" && cameraDetails.endpoints) {
+                    console.error("Received API info instead of camera details. Endpoint routing issue on server.");
+                    document.getElementById('camera-detections').innerHTML = 
+                        'API routing error<br><span style="font-size: 0.8em; color: #ff6b6b;">Server returned API info instead of camera details</span>';
+                    return;
+                }
+                
+                // Update detections information if available in camera info
+                if (cameraDetails && cameraDetails.detections) {
+                    // Log detection data for debugging
+                    console.log("Detection data found:", JSON.stringify(cameraDetails.detections, null, 2));
+                    
+                    // Update detection count text with correct grammar for people
+                    if (cameraDetails.people_detected !== undefined) {
+                        const count = cameraDetails.people_detected;
+                        const personText = count === 1 ? 'person' : 'people';
+                        document.getElementById('camera-detections').textContent = 
+                            `${count} ${personText} detected`;
+                    } else if (cameraDetails.detections && cameraDetails.detections.length > 0) {
+                        document.getElementById('camera-detections').textContent = 
+                            `${cameraDetails.detections.length} objects detected`;
+                    } else {
+                        // No detections or detections array is missing
+                        document.getElementById('camera-detections').textContent = 'No detections';
+                    }
+                    
+                    // Create a more detailed detections display
+                    if (cameraDetails.detections.length > 0) {
+                        // First set the summary count
+                        const detectionsElement = document.getElementById('camera-detections');
+                        
+                        // Then create a detailed list
+                        let detailsHtml = '<div class="detection-details">';
+                        cameraDetails.detections.forEach((detection, index) => {
+                            const className = detection.class_name || `Class ${detection.class_id}`;
+                            const confidence = Math.round(detection.confidence * 100);
+                            // Add box position info for more detail
+                            const posX = Math.round(detection.box?.center_x || 0);
+                            const posY = Math.round(detection.box?.center_y || 0);
+                            const width = Math.round(detection.box?.width || 0);
+                            const height = Math.round(detection.box?.height || 0);
+                            
+                            detailsHtml += `<div class="detection-item">
+                                ${index+1}. ${className} (${confidence}%) at [${posX},${posY}] size ${width}×${height}
+                            </div>`;
+                        });
+                        detailsHtml += '</div>';
+                        
+                        // Append detailed detection info to the detection count
+                        detectionsElement.innerHTML += detailsHtml;
+                    }
+                } else {
+                    // No detection data available
+                    console.log("No detection data in camera details");
+                    
+                    // Just show "No detections" without additional context/warnings
+                    document.getElementById('camera-detections').textContent = 'No detections';
+                }
+            } catch (error) {
+                console.error("Failed to get detection info:", error);
+                // Just show "No detections" for any API error
+                document.getElementById('camera-detections').textContent = 'No detections';
+            }
         }
         
-        function updateCameraImage() {
+        function setupMjpegStream() {
             const camera = cameras.find(c => c.id === currentCameraId);
             if (!camera || !camera.online) return;
             
             const img = document.getElementById('camera-image');
             
-            // Add a timestamp to prevent caching
-            const timestamp = Date.now();
-            const frameUrl = `${API_BASE}/api/cameras/${currentCameraId}/frame?_=${timestamp}`;
+            // Use MJPEG streaming - directly set the image source to the stream URL
+            // This is more efficient than polling with fetch
+            const streamUrl = `${API_BASE}/api/cameras/${currentCameraId}/stream`;
+            console.log("Setting up MJPEG stream from:", streamUrl);
             
-            console.log("Fetching frame from:", frameUrl);
+            // Set up error handling
+            img.onerror = () => {
+                console.error("Error loading MJPEG stream");
+                // If streaming fails, fall back to polling
+                img.onerror = null; // Clear error handler to prevent loops
+                fallbackToPolling();
+            };
             
-            // Use fetch to get image and handle errors
-            fetch(frameUrl)
-                .then(response => {
-                    if (!response.ok) {
-                        console.error("Error fetching frame:", response.status, response.statusText);
-                        throw new Error(`HTTP error! Status: ${response.status}`);
-                    }
-                    return response.blob();
-                })
-                .then(blob => {
-                    const objectUrl = URL.createObjectURL(blob);
-                    img.src = objectUrl;
-                    console.log("Loaded frame, size:", blob.size, "bytes");
-                    
-                    // Update timestamp
-                    const now = new Date();
-                    document.getElementById('camera-timestamp').textContent = now.toLocaleTimeString();
-                })
-                .catch(error => {
-                    console.error("Error loading frame:", error);
-                    // If we can't load the frame, show an error message
-                    if (!img.dataset.errorShown) {
-                        img.dataset.errorShown = "true";
-                        const errorMessage = document.createElement('div');
-                        errorMessage.textContent = "Error loading camera feed";
-                        errorMessage.style.color = "red";
-                        img.parentNode.appendChild(errorMessage);
-                    }
-                });
+            // Start streaming
+            img.src = streamUrl;
+            streamActive = true;
             
-            // In a real implementation, we would fetch detection data separately
-            // and update the overlay
-            updateDetectionOverlay([
-                { type: 'person', confidence: 0.94, boundingBox: { x: 0.2, y: 0.3, width: 0.1, height: 0.2 } },
-                { type: 'vehicle', confidence: 0.87, boundingBox: { x: 0.6, y: 0.5, width: 0.2, height: 0.1 } }
-            ]);
+            // Immediately update camera info when stream starts
+            updateCameraInfo();
             
-            // Update resolution when image is loaded
+            
+            // We get resolution from the API now
             img.onload = () => {
-                document.getElementById('camera-resolution').textContent = 
-                    `${img.naturalWidth} � ${img.naturalHeight}`;
+                // Image loaded successfully
+                console.log("MJPEG stream started successfully");
             };
         }
         
-        function updateDetectionOverlay(detections) {
-            const overlayContainer = document.getElementById('detection-overlays');
+        function stopMjpegStream() {
             const img = document.getElementById('camera-image');
+            img.src = 'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7';
+            streamActive = false;
+        }
+        
+        function fallbackToPolling() {
+            console.log("Falling back to polling for frames");
+            streamActive = false;
             
-            // Clear previous overlays
-            overlayContainer.innerHTML = '';
+            // Start polling for frames at a higher rate for smoother video
+            const FALLBACK_INTERVAL = 50; // 0.05 seconds (20 fps)
             
-            // Update detection count
-            document.getElementById('camera-detections').textContent = 
-                detections.length > 0 ? `${detections.length} detected` : 'None';
+            function pollFrame() {
+                if (!currentCameraId) return;
+                
+                const camera = cameras.find(c => c.id === currentCameraId);
+                if (!camera || !camera.online) return;
+                
+                const img = document.getElementById('camera-image');
+                
+                // Add a timestamp to prevent caching
+                const timestamp = Date.now();
+                const frameUrl = `${API_BASE}/api/cameras/${currentCameraId}/frame?_=${timestamp}`;
+                
+                // Use fetch to get image
+                fetch(frameUrl)
+                    .then(response => {
+                        if (!response.ok) {
+                            throw new Error(`HTTP error! Status: ${response.status}`);
+                        }
+                        return response.blob();
+                    })
+                    .then(blob => {
+                        const objectUrl = URL.createObjectURL(blob);
+                        img.src = objectUrl;
+                    })
+                    .catch(error => {
+                        console.error("Error loading frame:", error);
+                    });
+            }
             
-            // Add detection overlays
-            // In a real implementation, these would be positioned correctly
-            // based on the bounding box coordinates
-            detections.forEach(detection => {
-                // Create the detection box
-                const box = document.createElement('div');
-                box.className = `detection-box type-${detection.type}`;
-                
-                // Positioning logic would need to account for image scaling
-                // For now, we'll skip this part
-                
-                // Create the label
-                const label = document.createElement('div');
-                label.className = 'detection-label';
-                label.textContent = `${detection.type} ${Math.round(detection.confidence * 100)}%`;
-                
-                box.appendChild(label);
-                overlayContainer.appendChild(box);
-            });
+            // Start polling
+            pollFrame();
+            setInterval(pollFrame, FALLBACK_INTERVAL);
+        }
+        
+        // Note: This function is retained for reference but no longer actively used
+        // as we now draw detection boxes on the server side and get detection info from the API
+        function updateDetectionOverlay(detections) {
+            // Function kept for reference but no longer called
+            console.log("Legacy detection overlay function called with:", detections);
         }
     </script>
 </body>

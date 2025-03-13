@@ -39,26 +39,61 @@ int main(int argc, char* argv[]) {
     // Initialize logging
     init_logging();
     LOGI("Starting streamd");
+    
+    LOGI("Usage: streamd [options]");
+    LOGI("Options:");
+    LOGI("  --port <port>                 : HTTP server port (default: 8080)");
+    LOGI("  --shared-mem <name>           : Shared memory name (default: camera-1)");
+    LOGI("  --camera-id <id>              : Camera ID (can be specified multiple times)");
+    LOGI("  --use-person-detector         : Enable person detection with YOLO");
+    LOGI("  --yolo-model <path>           : Path to YOLO model (default: ../assets/yolo11.onnx)");
+    LOGI("  --yolo-labels <path>          : Path to YOLO labels (default: ../assets/yolo11_labels.txt)");
 
     // Parse command line arguments
     // In a real application, you would add proper CLI argument parsing
     uint16_t port = 8080;
     std::string shared_mem_name = "camera-1";  // Changed to match starburstd
     std::vector<std::string> camera_ids = {"camera-1"};
+    bool use_person_detector = false;
+    std::string yolo_model_path = "../assets/yolo11.onnx";
+    std::string yolo_labels_path = "../assets/yolo11_labels.txt";
 
-    if (argc > 1) {
-        port = static_cast<uint16_t>(std::atoi(argv[1]));
-    }
-    
-    if (argc > 2) {
-        shared_mem_name = argv[2];
-    }
-    
-    if (argc > 3) {
-        camera_ids.clear();
-        for (int i = 3; i < argc; i++) {
-            camera_ids.push_back(argv[i]);
+    // Parse arguments
+    for (int i = 1; i < argc; i++) {
+        std::string arg = argv[i];
+        
+        if (arg == "--port" && i + 1 < argc) {
+            port = static_cast<uint16_t>(std::atoi(argv[++i]));
         }
+        else if (arg == "--shared-mem" && i + 1 < argc) {
+            shared_mem_name = argv[++i];
+        }
+        else if (arg == "--camera-id" && i + 1 < argc) {
+            if (camera_ids.size() == 1 && camera_ids[0] == "camera-1") {
+                // Clear default if this is the first camera ID
+                camera_ids.clear();
+            }
+            camera_ids.push_back(argv[++i]);
+        }
+        else if (arg == "--use-person-detector") {
+            use_person_detector = true;
+        }
+        else if (arg == "--yolo-model" && i + 1 < argc) {
+            yolo_model_path = argv[++i];
+        }
+        else if (arg == "--yolo-labels" && i + 1 < argc) {
+            yolo_labels_path = argv[++i];
+        }
+    }
+    
+    LOGI("Command line parsing complete:");
+    LOGI("  Port: {}", port);
+    LOGI("  Shared memory: {}", shared_mem_name);
+    LOGI("  Camera IDs: {}", fmt::join(camera_ids, ", "));
+    LOGI("  Use person detector: {}", use_person_detector ? "Yes" : "No");
+    if (use_person_detector) {
+        LOGI("  YOLO model: {}", yolo_model_path);
+        LOGI("  YOLO labels: {}", yolo_labels_path);
     }
 
     // Configure and start the service
@@ -68,6 +103,9 @@ int main(int argc, char* argv[]) {
     config.http_port = port;
     config.shared_memory_name = shared_mem_name;
     config.camera_ids = camera_ids;
+    config.use_person_detector = use_person_detector;
+    config.yolo_model_path = yolo_model_path;
+    config.yolo_labels_path = yolo_labels_path;
     
     LOGI("Configuration: port={}, shared_memory_name={}, camera_ids={}", 
          port, shared_mem_name, fmt::join(camera_ids, ","));

@@ -55,7 +55,23 @@ StreamService::StreamService(StreamServiceConfig config)
     : Service(config.base),
       shared_memory_name_(config.shared_memory_name),
       http_port_(config.http_port),
-      camera_ids_(config.camera_ids) {}
+      camera_ids_(config.camera_ids),
+      use_person_detector_(config.use_person_detector),
+      yolo_(nullptr) {
+          
+    if (use_person_detector_) {
+        LOGI("Initializing YOLO person detector with model {} and labels {}", 
+             config.yolo_model_path, config.yolo_labels_path);
+        try {
+            yolo_ = std::make_unique<YouOnlyLookOnce>(
+                config.yolo_model_path, config.yolo_labels_path, false);
+            LOGI("YOLO model loaded successfully");
+        } catch (const std::exception& e) {
+            LOGE("Failed to load YOLO model: {}", e.what());
+            use_person_detector_ = false;
+        }
+    }
+}
 
 void StreamService::eventHandler(struct mg_connection* c, int ev,
                                  void* ev_data) {
@@ -71,6 +87,18 @@ void StreamService::eventHandler(struct mg_connection* c, int ev,
             // List all cameras
             handleListCameras(c, service);
         } else if (uri.find("/api/cameras/") == 0 &&
+                   uri.find("/stream") != std::string::npos) {
+            // MJPEG streaming endpoint
+            LOGD("MJPEG stream request: {}", uri);
+
+            // Extract the camera ID
+            size_t start_pos = strlen("/api/cameras/");
+            size_t end_pos = uri.find("/stream", start_pos);
+            std::string camera_id = uri.substr(start_pos, end_pos - start_pos);
+
+            LOGD("Extracted camera ID for stream: {}", camera_id);
+            handleMjpegStream(c, camera_id, service);
+        } else if (uri.find("/api/cameras/") == 0 &&
                    uri.find("/frame") != std::string::npos) {
             // Simplified camera frame endpoint check
             LOGD("Camera frame request: {}", uri);
@@ -82,9 +110,9 @@ void StreamService::eventHandler(struct mg_connection* c, int ev,
 
             LOGD("Extracted camera ID: {}", camera_id);
             handleGetCameraFrame(c, camera_id, service);
-        } else if (std::regex_match(uri, std::regex(R"(/api/cameras/(\w+))"))) {
-            // Extract camera ID from URI (similar to above, but without the
-            // /frame part)
+        } else if (std::regex_match(uri, std::regex(R"(/api/cameras/([\w\-]+))"))) {
+            // Extract camera ID from URI (supporting alpha-numeric and hyphens)
+            // using regex group to properly extract camera IDs with hyphens
             const char* start = uri.c_str() + 13;  // Skip "/api/cameras/"
             std::string camera_id(start, uri.c_str() + uri.length() - start);
             handleGetCameraInfo(c, camera_id, service);
@@ -100,7 +128,8 @@ void StreamService::eventHandler(struct mg_connection* c, int ev,
                 {"status", "running"},
                 {"endpoints",
                  {"/api/cameras", "/api/cameras/{camera_id}",
-                  "/api/cameras/{camera_id}/frame"}},
+                  "/api/cameras/{camera_id}/frame",
+                  "/api/cameras/{camera_id}/stream"}},
                 {"message", "Pallas Stream Service API"}};
 
             std::string json_str = api_info.dump(2);
@@ -136,11 +165,99 @@ void StreamService::handleGetCameraInfo(struct mg_connection* c,
         "%s", json_str.c_str());
 }
 
+void StreamService::handleMjpegStream(struct mg_connection* c,
+                                      const std::string& camera_id,
+                                      StreamService* service) {
+    // Mark this connection as a streamer
+    c->is_resp =
+        1;  // This tells Mongoose not to close the connection after response
+    c->data[0] = 1;  // Use user data to mark this connection as MJPEG streamer
+
+    // Store camera ID in the connection data for later use
+    // We'll use a simple approach - store just a pointer to a newly allocated
+    // string
+    if (c->fn_data != service) {
+        LOGE("Invalid service pointer in connection");
+        mg_error(c, "Internal server error");
+        return;
+    }
+
+    // Add the connection to the list of MJPEG streamers if not already there
+    static std::unordered_map<mg_connection*, std::string> mjpeg_connections;
+    mjpeg_connections[c] = camera_id;
+
+    LOGI("Starting MJPEG stream for camera {}", camera_id);
+
+    // Send MJPEG stream headers
+    mg_printf(
+        c, "%s",
+        "HTTP/1.1 200 OK\r\n"
+        "Content-Type: multipart/x-mixed-replace; boundary=mjpegstream\r\n"
+        "Cache-Control: no-cache, no-store, must-revalidate, max-age=0\r\n"
+        "Pragma: no-cache\r\n"
+        "Access-Control-Allow-Origin: *\r\n"
+        "Connection: close\r\n"
+        "\r\n");
+
+    // The first frame will be sent during the next tick cycle
+    // We create a timer callback function that will be called by Mongoose
+    // periodically to send new frames
+    mg_timer_add(
+        &service->mgr_, 25,  // 25ms timer (approx 40fps) for smoother streaming
+        MG_TIMER_REPEAT | MG_TIMER_RUN_NOW,
+        [](void* arg) {
+            // Timer callback - send frame to all active MJPEG connections
+            auto conn_map =
+                static_cast<std::unordered_map<mg_connection*, std::string>*>(
+                    arg);
+
+            // Iterate through all connections
+            for (auto it = conn_map->begin(); it != conn_map->end();) {
+                auto conn = it->first;
+                const auto& cam_id = it->second;
+
+                // Get the service pointer
+                StreamService* svc = static_cast<StreamService*>(conn->fn_data);
+
+                // Skip connections that are closed or errored
+                if (conn->is_closing || conn->is_draining) {
+                    LOGI("Removing closed MJPEG connection for camera {}",
+                         cam_id);
+                    it = conn_map->erase(it);
+                    continue;
+                }
+
+                // Create buffer for the response
+                std::vector<uint8_t> jpeg_buffer;
+                {
+                    std::lock_guard<std::mutex> lock(svc->mutex_);
+                    svc->serveLatestFrame(cam_id, jpeg_buffer);
+                }
+
+                if (!jpeg_buffer.empty()) {
+                    // Send the MJPEG part header
+                    mg_printf(conn,
+                              "--mjpegstream\r\n"
+                              "Content-Type: image/jpeg\r\n"
+                              "Content-Length: %lu\r\n\r\n",
+                              jpeg_buffer.size());
+
+                    // Send the binary JPEG data
+                    mg_send(conn, jpeg_buffer.data(), jpeg_buffer.size());
+                    mg_send(conn, "\r\n", 2);  // End with CRLF
+                }
+
+                ++it;
+            }
+        },
+        &mjpeg_connections);
+}
+
 void StreamService::handleGetCameraFrame(struct mg_connection* c,
                                          const std::string& camera_id,
                                          StreamService* service) {
-    // Limit the rate of frame requests (no more than one per 50ms per
-    // connection)
+    // Limit the rate of frame requests (no more than one per 25ms per
+    // connection) - allows up to 40fps
     static std::unordered_map<void*, std::chrono::steady_clock::time_point>
         last_request_times;
     auto now = std::chrono::steady_clock::now();
@@ -151,14 +268,14 @@ void StreamService::handleGetCameraFrame(struct mg_connection* c,
         auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
                            now - it->second)
                            .count();
-        if (elapsed < 50) {
+        if (elapsed < 25) {
             // Too many requests, respond with a 429 (Too Many Requests)
             LOGW(
                 "Rate limit: connection requesting too quickly ({}ms), camera "
                 "{}",
                 elapsed, camera_id);
             mg_http_reply(c, 429, "Access-Control-Allow-Origin: *\r\n",
-                          "Too many requests. Please wait at least 50ms "
+                          "Too many requests. Please wait at least 25ms "
                           "between requests.");
             return;
         }
@@ -366,6 +483,54 @@ std::expected<void, std::string> StreamService::tick() {
             // Store the latest frame
             latest_frames_[camera_id] = frame.clone();
             any_frames_received = true;
+            
+            // Run person detection if enabled
+            if (use_person_detector_ && yolo_) {
+                try {
+                    // Run YOLO detection with default thresholds
+                    const float confidence_threshold = 0.25f;
+                    const float iou_threshold = 0.45f;
+                    
+                    auto detections = yolo_->detect(frame, confidence_threshold, iou_threshold);
+                    
+                    // Store all detections for this camera
+                    latest_detections_[camera_id] = detections;
+                    
+                    // Log detection results with more detail for debugging
+                    if (!detections.empty()) {
+                        LOGI("Detected {} objects in camera {}", detections.size(), camera_id);
+                        
+                        // Count person detections (class_id 0 is person in COCO dataset)
+                        int person_count = 0;
+                        for (const auto& detection : detections) {
+                            // Log each detection for detailed debugging
+                            std::string class_name = "unknown";
+                            if (yolo_ && detection.class_id < static_cast<int>(yolo_->class_names().size())) {
+                                class_name = yolo_->class_names()[detection.class_id];
+                            }
+                            
+                            LOGI("  Detection: class_id={} ({}) conf={:.2f} at position [{},{}] size {}x{}",
+                                detection.class_id, 
+                                class_name,
+                                detection.confidence,
+                                detection.box.center.x, 
+                                detection.box.center.y,
+                                detection.box.width,
+                                detection.box.height);
+                                
+                            if (detection.class_id == 0) { // Person class
+                                person_count++;
+                            }
+                        }
+                        
+                        if (person_count > 0) {
+                            LOGI("Detected {} people in camera {}", person_count, camera_id);
+                        }
+                    }
+                } catch (const std::exception& e) {
+                    LOGE("Error during person detection: {}", e.what());
+                }
+            }
         }
     }
 
@@ -375,16 +540,22 @@ std::expected<void, std::string> StreamService::tick() {
         static int tick_counter = 0;
         if (tick_counter++ % 30 == 0) {
             for (const auto& camera_id : camera_ids_) {
-                // Create a basic colored frame with timestamp
-                cv::Mat test_frame(480, 640, CV_8UC3,
-                                   cv::Scalar(0, 0, 255));  // Red frame
+                // Create a basic colored frame with timestamp (higher quality)
+                cv::Mat test_frame(720, 1280, CV_8UC3,
+                                   cv::Scalar(0, 0, 200));  // Deep blue frame with higher resolution
 
-                // Add text
-                cv::putText(test_frame, "TEST FRAME", cv::Point(200, 240),
-                            cv::FONT_HERSHEY_SIMPLEX, 1.5,
-                            cv::Scalar(255, 255, 255), 2);
+                // Add a larger, more visible header box
+                cv::rectangle(test_frame, cv::Point(140, 140), cv::Point(1140, 580),
+                            cv::Scalar(40, 40, 100), -1); // Filled rectangle
+                cv::rectangle(test_frame, cv::Point(140, 140), cv::Point(1140, 580),
+                            cv::Scalar(100, 100, 255), 5); // Border
+
+                // Add text with larger, more readable fonts
+                cv::putText(test_frame, "TEST FRAME", cv::Point(400, 280),
+                            cv::FONT_HERSHEY_SIMPLEX, 2.5,
+                            cv::Scalar(255, 255, 255), 3);
                 cv::putText(test_frame, "Camera ID: " + camera_id,
-                            cv::Point(180, 280), cv::FONT_HERSHEY_SIMPLEX, 1.0,
+                            cv::Point(350, 380), cv::FONT_HERSHEY_SIMPLEX, 1.8,
                             cv::Scalar(255, 255, 255), 2);
 
                 // Add current time
@@ -393,7 +564,7 @@ std::expected<void, std::string> StreamService::tick() {
                 std::strftime(time_str, sizeof(time_str), "%H:%M:%S",
                               std::localtime(&now));
                 cv::putText(test_frame, "Time: " + std::string(time_str),
-                            cv::Point(180, 320), cv::FONT_HERSHEY_SIMPLEX, 1.0,
+                            cv::Point(380, 480), cv::FONT_HERSHEY_SIMPLEX, 1.8,
                             cv::Scalar(255, 255, 255), 2);
 
                 // Store in latest frames
@@ -413,18 +584,32 @@ void StreamService::serveLatestFrame(const std::string& camera_id,
     auto it = latest_frames_.find(camera_id);
     if (it != latest_frames_.end()) {
         try {
-            // Resize the image to make it smaller and faster to transmit
+            // Make a copy of the frame so we can draw on it
+            cv::Mat frame_to_serve = it->second.clone();
+            
+            // Draw bounding boxes for detections if person detection is enabled
+            if (use_person_detector_ && yolo_) {
+                auto detection_it = latest_detections_.find(camera_id);
+                if (detection_it != latest_detections_.end() && !detection_it->second.empty()) {
+                    // Draw all detections on the frame
+                    yolo_->drawBoundingBox(frame_to_serve, detection_it->second);
+                    LOGI("Drew {} detection boxes on frame for camera {}", 
+                         detection_it->second.size(), camera_id);
+                }
+            }
+            
+            // Resize the image to a higher resolution for better quality
             cv::Mat resized;
-            cv::resize(it->second, resized, cv::Size(320, 240), 0, 0,
+            cv::resize(frame_to_serve, resized, cv::Size(640, 480), 0, 0,
                        cv::INTER_LINEAR);
 
-            // Convert to JPEG with lower quality for faster transmission
-            std::vector<int> params = {cv::IMWRITE_JPEG_QUALITY, 75};
+            // Convert to JPEG with higher quality for better visual appearance
+            std::vector<int> params = {cv::IMWRITE_JPEG_QUALITY, 90};
             jpeg_buffer.clear();  // Make sure buffer is empty
             cv::imencode(".jpg", resized, jpeg_buffer, params);
 
             LOGI(
-                "Encoded frame for camera {}, resized {}x{} → 320x240, JPEG "
+                "Encoded frame for camera {}, resized {}x{} → 640x480, JPEG "
                 "size: {} bytes",
                 camera_id, it->second.cols, it->second.rows,
                 jpeg_buffer.size());
@@ -433,21 +618,21 @@ void StreamService::serveLatestFrame(const std::string& camera_id,
             jpeg_buffer.clear();
         }
     } else {
-        // Create a smaller test pattern if no real frame is available
-        cv::Mat test_pattern(240, 320, CV_8UC3,
+        // Create a test pattern at higher resolution
+        cv::Mat test_pattern(480, 640, CV_8UC3,
                              cv::Scalar(255, 0, 0));  // Blue background
 
         // Draw a white rectangle
-        cv::rectangle(test_pattern, cv::Point(50, 50), cv::Point(270, 190),
-                      cv::Scalar(255, 255, 255), 3);
+        cv::rectangle(test_pattern, cv::Point(100, 100), cv::Point(540, 380),
+                      cv::Scalar(255, 255, 255), 5);
 
-        // Add text - smaller text for smaller image
-        cv::putText(test_pattern, "No Camera Feed", cv::Point(80, 100),
-                    cv::FONT_HERSHEY_SIMPLEX, 0.7, cv::Scalar(255, 255, 255),
-                    1);
-        cv::putText(test_pattern, "Camera ID: " + camera_id, cv::Point(80, 130),
-                    cv::FONT_HERSHEY_SIMPLEX, 0.5, cv::Scalar(255, 255, 255),
-                    1);
+        // Add text with larger font for better readability
+        cv::putText(test_pattern, "No Camera Feed", cv::Point(160, 200),
+                    cv::FONT_HERSHEY_SIMPLEX, 1.2, cv::Scalar(255, 255, 255),
+                    2);
+        cv::putText(test_pattern, "Camera ID: " + camera_id, cv::Point(160, 260),
+                    cv::FONT_HERSHEY_SIMPLEX, 1.0, cv::Scalar(255, 255, 255),
+                    2);
 
         // Get current time
         std::time_t now = std::time(nullptr);
@@ -455,16 +640,16 @@ void StreamService::serveLatestFrame(const std::string& camera_id,
         std::strftime(time_str, sizeof(time_str), "%H:%M:%S",
                       std::localtime(&now));
         cv::putText(test_pattern, "Time: " + std::string(time_str),
-                    cv::Point(80, 160), cv::FONT_HERSHEY_SIMPLEX, 0.5,
-                    cv::Scalar(255, 255, 255), 1);
+                    cv::Point(160, 320), cv::FONT_HERSHEY_SIMPLEX, 1.0,
+                    cv::Scalar(255, 255, 255), 2);
 
-        // Encode to JPEG with lower quality
-        std::vector<int> params = {cv::IMWRITE_JPEG_QUALITY, 75};
+        // Encode to JPEG with higher quality
+        std::vector<int> params = {cv::IMWRITE_JPEG_QUALITY, 90};
         try {
             jpeg_buffer.clear();  // Make sure buffer is empty
             cv::imencode(".jpg", test_pattern, jpeg_buffer, params);
             LOGI(
-                "Created small fallback test pattern (320x240) for camera {}, "
+                "Created fallback test pattern (640x480) for camera {}, "
                 "JPEG size: {} bytes",
                 camera_id, jpeg_buffer.size());
         } catch (const std::exception& e) {
@@ -489,8 +674,66 @@ nlohmann::json StreamService::getCameraInfo(const std::string& camera_id) {
     // Add resolution if we have a frame
     auto it = latest_frames_.find(camera_id);
     if (it != latest_frames_.end()) {
-        camera_info["resolution"] = {{"width", it->second.cols},
-                                     {"height", it->second.rows}};
+        int width = it->second.cols;
+        int height = it->second.rows;
+        
+        // Log the original resolution
+        LOGI("Camera {} original resolution: {}x{}", camera_id, width, height);
+        
+        // Original resolution before resizing
+        camera_info["resolution"] = {{"width", width}, {"height", height}};
+        
+        // Display resolution (after resizing)
+        camera_info["display_resolution"] = {{"width", 640}, {"height", 480}};
+    } else {
+        // If no frame is available, use default values
+        LOGI("No frame available for camera {}, using default resolution", camera_id);
+        camera_info["resolution"] = {{"width", 1280}, {"height", 720}};
+        camera_info["display_resolution"] = {{"width", 640}, {"height", 480}};
+    }
+    
+    // Add detection information if available
+    if (use_person_detector_ && yolo_) {
+        auto detection_it = latest_detections_.find(camera_id);
+        if (detection_it != latest_detections_.end() && !detection_it->second.empty()) {
+            // Count detections by class
+            std::unordered_map<int, int> class_counts;
+            for (const auto& detection : detection_it->second) {
+                class_counts[detection.class_id]++;
+            }
+            
+            // Add detection information to the response
+            nlohmann::json detections_json = nlohmann::json::array();
+            for (const auto& detection : detection_it->second) {
+                nlohmann::json detection_json;
+                detection_json["class_id"] = detection.class_id;
+                
+                if (yolo_ && detection.class_id < static_cast<int>(yolo_->class_names().size())) {
+                    detection_json["class_name"] = yolo_->class_names()[detection.class_id];
+                } else {
+                    detection_json["class_name"] = "unknown";
+                }
+                
+                detection_json["confidence"] = detection.confidence;
+                detection_json["box"] = {
+                    {"center_x", detection.box.center.x},
+                    {"center_y", detection.box.center.y},
+                    {"width", detection.box.width},
+                    {"height", detection.box.height}
+                };
+                detections_json.push_back(detection_json);
+            }
+            
+            camera_info["detections"] = detections_json;
+            camera_info["detection_counts"] = class_counts;
+            
+            // Quick summary of people detected
+            camera_info["people_detected"] = class_counts[0];
+        } else {
+            // No detections for this camera
+            camera_info["detections"] = nlohmann::json::array();
+            camera_info["people_detected"] = 0;
+        }
     }
 
     return camera_info;

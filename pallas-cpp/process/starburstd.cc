@@ -7,9 +7,9 @@ int main() {
   pallas::init_logging();
 
   const pallas::CameraServiceConfig config{
-      .base = {.name = "starburst", .port = 8888, .interval_ms = 50.0},
+      .base = {.name = "starburst", .port = 8888, .interval_ms = 33.3}, // ~30fps
       .shared_memory_name = "camera-1",
-      .shared_memory_frame_capacity = 5};
+      .shared_memory_frame_capacity = 20}; // Increased capacity for better buffering
   pallas::CameraService camera_service{config}; 
 
   camera_service.start();

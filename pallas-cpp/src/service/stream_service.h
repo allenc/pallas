@@ -5,6 +5,7 @@
 
 #include <core/service.h>
 #include <mongoose.h>
+#include <vision/yolo.h>
 
 #include <atomic>
 #include <cstddef>
@@ -26,6 +27,9 @@ struct StreamServiceConfig {
     std::string shared_memory_name;
     uint16_t http_port;
     std::vector<std::string> camera_ids;
+    bool use_person_detector = false;
+    std::string yolo_model_path = "../assets/yolo11.onnx";
+    std::string yolo_labels_path = "../assets/yolo11_labels.txt";
 };
 
 class StreamService : public Service {
@@ -62,6 +66,11 @@ class StreamService : public Service {
     std::atomic<bool> http_server_running_{false};
     std::thread http_server_thread_;
 
+    // YOLO detection
+    bool use_person_detector_;
+    std::unique_ptr<YouOnlyLookOnce> yolo_;
+    std::unordered_map<std::string, std::vector<Detection>> latest_detections_;
+
     // Mutex for thread safety
     std::mutex mutex_;
 
@@ -77,6 +86,9 @@ class StreamService : public Service {
     static void handleGetCameraFrame(struct mg_connection* c,
                                      const std::string& camera_id,
                                      StreamService* service);
+    static void handleMjpegStream(struct mg_connection* c,
+                                  const std::string& camera_id,
+                                  StreamService* service);
     static void serveStaticFile(struct mg_connection* c,
                                 const std::string& path);
 };
