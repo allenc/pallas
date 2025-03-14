@@ -19,6 +19,10 @@ find_package(nanobind CONFIG REQUIRED)
 find_package(OpenCV REQUIRED)
 find_package(spdlog REQUIRED)
 find_package(onnxruntime REQUIRED)
+find_package(PkgConfig REQUIRED)
+
+# Find libusb
+pkg_check_modules(LIBUSB REQUIRED libusb-1.0)
 
 # Nix version of spdlog
 add_compile_definitions(SPDLOG_FMT_EXTERNAL)
@@ -78,7 +82,7 @@ add_library(vision STATIC
   src/vision/geometry.cc
   src/vision/sam.cc      
   src/vision/yolo.cc
-  src/vision/yolo_utils.cc          
+  src/vision/yolo_utils.cc
 )
 
 target_include_directories(vision PUBLIC
@@ -95,15 +99,7 @@ nanobind_add_module(pallas_py
 
 target_link_libraries(pallas_py PRIVATE core vision)
 
-# -- Executables: Services --
-add_executable(ps3
-  src/vision/ps3.cc
-)
-target_include_directories(ps3 PRIVATE
-    ${CMAKE_CURRENT_LIST_DIR}/src
-  )
-target_link_libraries(ps3 PUBLIC core vision)  
-  
+# -- Executables: Services --  
 add_executable(psystreamd
   process/psystreamd.cc
   src/service/inference_service.cc
@@ -115,12 +111,15 @@ target_link_libraries(psystreamd PUBLIC core vision)
   
 add_executable(starburstd
   process/starburstd.cc
-  src/service/camera_service.cc  
+  src/service/camera_service.cc
+  src/service/ps3.cc    
+  src/service/ps3_camera_service.cc
 )
 target_include_directories(starburstd PRIVATE
     ${CMAKE_CURRENT_LIST_DIR}/src
+    ${LIBUSB_INCLUDE_DIRS}
 )
-target_link_libraries(starburstd PUBLIC core ${OpenCV_LIBS})
+target_link_libraries(starburstd PUBLIC core PRIVATE vision ${OpenCV_LIBS} ${LIBUSB_LIBRARIES})
 
 add_executable(starforged
   process/starforged.cc

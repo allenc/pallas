@@ -3,6 +3,8 @@
 #include <gtest/gtest.h>
 #include <vision/sam.h>
 
+#include <filesystem>
+
 #include <opencv2/core.hpp>
 #include <opencv2/imgcodecs.hpp>
 #include <opencv2/imgproc.hpp>

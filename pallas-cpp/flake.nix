@@ -23,6 +23,7 @@
         # Shell
         devShells.default = pkgs.mkShell {
           packages = with pkgs; [
+            libusb1
             cmake
             opencv
             ftxui
