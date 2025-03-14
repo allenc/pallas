@@ -57,6 +57,12 @@ Make sure you have the necessary dependencies installed:
 
 - If you encounter permission issues with the USB device, you may need to run with sudo or add udev rules
 - To check if your PS3 Eye camera is detected, run `lsusb` and look for a device with ID 1415:2000
+- If the camera freezes after a short time:
+  - This may be caused by buffer issues or camera disconnection
+  - Try running starburstd with sudo: `sudo ./build/starburstd`
+  - Make sure the PS3 Eye camera is connected directly to your computer, not through a hub
+  - Check the camera's power supply - some PS3 Eye cameras need more power than standard USB ports provide
+  - Try using a different USB port, preferably USB 2.0 instead of USB 3.0
 - If the camera doesn't display in the frontend, check the logs from starburstd and streamd for error messages
 
 ## Core Components

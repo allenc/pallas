@@ -53,7 +53,8 @@ class StreamService : public Service {
     std::expected<void, std::string> tick() override;
 
    private:
-    using Queue = MatQueue<2764800>;
+  // using Queue = MatQueue<2764800>; // Resolution for webcam
+  using Queue = MatQueue<921600>; // Resolution for webcam  
 
     std::string shared_memory_name_;
     uint16_t http_port_;

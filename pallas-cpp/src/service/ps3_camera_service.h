@@ -31,7 +31,7 @@ class PS3CameraService : public Service {
     std::expected<void, std::string> tick() override;
 
    private:
-    using Queue = MatQueue<76800>; // Same size as used in CameraService
+  using Queue = MatQueue<921600>; 
 
     std::string shared_memory_name_;
     std::size_t shared_memory_frame_capacity_;

@@ -52,20 +52,52 @@ void PS3CameraService::stop() {
 
 std::expected<void, std::string> PS3CameraService::tick() {
     if (!camera_.isOpen()) {
-        return std::unexpected("PS3 Eye camera is not open on tick.");
+        // Try to reopen the camera if it's not open
+        LOGW("PS3 Eye camera is not open, attempting to reopen");
+        auto result = camera_.open();
+        if (!result) {
+            return std::unexpected("Failed to reopen PS3 Eye camera: " + result.error());
+        }
+        LOGI("Successfully reopened PS3 Eye camera");
     }
 
+    // Try to capture a frame from the camera
     auto frame_result = camera_.captureFrame();
     if (!frame_result) {
-        return std::unexpected("Failed to capture frame from PS3 Eye camera: " + 
-                              frame_result.error());
+        LOGE("Failed to capture frame: {}", frame_result.error());
+        
+        // If frame capture fails, close and reopen the camera
+        LOGW("Closing and reopening camera due to frame capture failure");
+        camera_.close();
+        auto reopen_result = camera_.open();
+        if (!reopen_result) {
+            return std::unexpected("Failed to reopen camera after frame capture failure: " + 
+                                  reopen_result.error());
+        }
+        
+        // Try one more time to capture a frame
+        frame_result = camera_.captureFrame();
+        if (!frame_result) {
+            return std::unexpected("Failed to capture frame after camera reopen: " + 
+                                  frame_result.error());
+        }
     }
 
     cv::Mat frame = frame_result.value();
 
-    // Write the frame to shared memory
-    if (!queue_->try_push(frame)) {
-        return std::unexpected("Failed to push frame to shared memory on tick.");
+    // Try to push frame to the queue, retrying if it fails
+    int retry_count = 0;
+    const int max_retries = 3;
+    
+    while (!queue_->try_push(frame) && retry_count < max_retries) {
+        LOGW("Failed to push frame to shared memory (attempt {}), retrying...", retry_count + 1);
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        retry_count++;
+    }
+    
+    if (retry_count >= max_retries) {
+        LOGE("Failed to push frame to shared memory after {} attempts", max_retries);
+        return std::unexpected("Failed to push frame to shared memory after multiple attempts");
     }
 
     if (false)  // Write frames as images (disabled by default)
