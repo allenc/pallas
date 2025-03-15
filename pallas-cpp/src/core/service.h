@@ -21,7 +21,7 @@ class Service {
     Service();
     Service(ServiceConfig config);
     virtual ~Service();
-    virtual bool start();
+    virtual bool start(); 
     virtual void stop();
 
    protected:

@@ -1,4 +1,5 @@
-#include <base64.h>  // Include a base64 encoding library like https://github.com/ReneNyffenegger/cpp-base64
+#pragma once
+
 #include <curl/curl.h>
 
 #include <expected>
@@ -6,6 +7,31 @@
 #include <sstream>
 #include <string>
 #include <vector>
+
+// Simple base64 encoding function
+// You may replace this with a more robust implementation from a library
+inline std::string base64_encode(const unsigned char* data, size_t length) {
+    static const std::string base64_chars =
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+        "abcdefghijklmnopqrstuvwxyz"
+        "0123456789+/";
+    
+    std::string encoded;
+    encoded.reserve(((length + 2) / 3) * 4);
+    
+    for (size_t i = 0; i < length; i += 3) {
+        unsigned char b1 = data[i];
+        unsigned char b2 = (i + 1 < length) ? data[i + 1] : 0;
+        unsigned char b3 = (i + 2 < length) ? data[i + 2] : 0;
+        
+        encoded.push_back(base64_chars[(b1 >> 2) & 0x3F]);
+        encoded.push_back(base64_chars[((b1 & 0x03) << 4) | ((b2 >> 4) & 0x0F)]);
+        encoded.push_back((i + 1 < length) ? base64_chars[((b2 & 0x0F) << 2) | ((b3 >> 6) & 0x03)] : '=');
+        encoded.push_back((i + 2 < length) ? base64_chars[b3 & 0x3F] : '=');
+    }
+    
+    return encoded;
+}
 
 // Define the PhoneNumber class
 class PhoneNumber {
@@ -45,14 +71,17 @@ std::string matToBase64(const cv::Mat& image) {
 }
 
 // Main function to send text messages with optional images
-std::expected<void, std::string> text_user(const PhoneNumber& number,
-                                           const Payload& payload) {
-    // Twilio credentials - in a real application, these should be securely
-    // stored/accessed
-    const std::string TWILIO_ACCOUNT_SID = "YOUR_ACCOUNT_SID";
-    const std::string TWILIO_AUTH_TOKEN = "YOUR_AUTH_TOKEN";
-    const std::string TWILIO_PHONE_NUMBER =
-        "YOUR_TWILIO_PHONE_NUMBER";  // Must be in E.164 format: +1XXXYYYZZZZ
+std::expected<void, std::string> text_user(
+    const PhoneNumber& number,
+    const Payload& payload,
+    const std::string& twilio_account_sid,
+    const std::string& twilio_auth_token,
+    const std::string& twilio_phone_number) {
+    
+    // Validate credentials
+    if (twilio_account_sid.empty() || twilio_auth_token.empty() || twilio_phone_number.empty()) {
+        return std::unexpected<std::string>("Missing Twilio credentials");
+    }
 
     // Initialize curl
     CURL* curl = curl_easy_init();
@@ -62,11 +91,11 @@ std::expected<void, std::string> text_user(const PhoneNumber& number,
 
     // Prepare the request URL
     std::string url = "https://api.twilio.com/2010-04-01/Accounts/" +
-                      TWILIO_ACCOUNT_SID + "/Messages.json";
+                      twilio_account_sid + "/Messages.json";
 
     // Prepare the data
     std::string postFields =
-        "From=" + TWILIO_PHONE_NUMBER + "&To=" + number.toString() +
+        "From=" + twilio_phone_number + "&To=" + number.toString() +
         "&Body=" + curl_easy_escape(curl, payload.message.c_str(), 0);
 
     // Add images if present
@@ -100,7 +129,7 @@ std::expected<void, std::string> text_user(const PhoneNumber& number,
     curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
     curl_easy_setopt(curl, CURLOPT_POSTFIELDS, postFields.c_str());
     curl_easy_setopt(curl, CURLOPT_USERPWD,
-                     (TWILIO_ACCOUNT_SID + ":" + TWILIO_AUTH_TOKEN).c_str());
+                     (twilio_account_sid + ":" + twilio_auth_token).c_str());
 
     // Set up response handling
     std::string response;
@@ -126,31 +155,4 @@ std::expected<void, std::string> text_user(const PhoneNumber& number,
     }
 
     return {};
-}
-
-// Example usage
-int main() {
-    // Create a phone number
-    PhoneNumber recipient("+15551234567");
-
-    // Create a payload with a message and two images
-    Payload payload;
-    payload.message = "Hello from C++!";
-
-    // Create sample images (in a real app, you'd load these from files)
-    cv::Mat image1(100, 100, CV_8UC3, cv::Scalar(255, 0, 0));
-    cv::Mat image2(100, 100, CV_8UC3, cv::Scalar(0, 255, 0));
-    payload.images.push_back(image1);
-    payload.images.push_back(image2);
-
-    // Send the message
-    auto result = text_user(recipient, payload);
-
-    if (result.has_value()) {
-        std::cout << "Message sent successfully!" << std::endl;
-    } else {
-        std::cout << "Failed to send message: " << result.error() << std::endl;
-    }
-
-    return 0;
 }

@@ -153,6 +153,46 @@ target_compile_definitions(streamd PRIVATE
     MG_ENABLE_OPENSSL=0
 )
 
+# -- Alert Service --
+add_executable(alert_service_demo
+  process/alert_service_demo.cc
+  src/service/alert_service.cc
+)
+target_include_directories(alert_service_demo PRIVATE
+  ${CMAKE_CURRENT_LIST_DIR}/src
+  ${JSON_INCLUDE_DIR}
+)
+target_link_libraries(alert_service_demo PUBLIC
+  core
+  vision
+  ${OpenCV_LIBS}
+  curl
+)
+
+# -- Alert Integration Example --
+add_executable(alert_integration_example
+  process/alert_integration_example.cc
+  src/service/alert_service.cc
+  src/service/stream_service.cc
+  ${MONGOOSE_INCLUDE_DIR}/mongoose.c
+)
+target_include_directories(alert_integration_example PRIVATE
+  ${CMAKE_CURRENT_LIST_DIR}/src
+  ${MONGOOSE_INCLUDE_DIR}
+  ${JSON_INCLUDE_DIR}
+)
+target_link_libraries(alert_integration_example PUBLIC
+  core
+  vision
+  ${OpenCV_LIBS}
+  pthread
+  curl
+)
+# Define MG_ENABLE_OPENSSL=0 to disable OpenSSL
+target_compile_definitions(alert_integration_example PRIVATE 
+  MG_ENABLE_OPENSSL=0
+)
+
 # -- Executables: Tests --
 
 add_executable(unit-tests

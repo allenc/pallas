@@ -43,20 +43,30 @@ int main(int argc, char* argv[]) {
     LOGI("Usage: streamd [options]");
     LOGI("Options:");
     LOGI("  --port <port>                 : HTTP server port (default: 8080)");
-    LOGI("  --shared-mem <name>           : Shared memory name (default: camera-1)");
+    LOGI("  --shared-mem <name>              : Shared memory name (legacy, default: camera-1)");
     LOGI("  --camera-id <id>              : Camera ID (can be specified multiple times)");
     LOGI("  --use-person-detector         : Enable person detection with YOLO");
     LOGI("  --yolo-model <path>           : Path to YOLO model (default: ../assets/yolo11.onnx)");
     LOGI("  --yolo-labels <path>          : Path to YOLO labels (default: ../assets/yolo11_labels.txt)");
+    LOGI("");
+    LOGI("Default camera IDs (automatically detected):");
+    LOGI("  ps3-0, ps3-1      : PS3 cameras with device IDs 0 and 1");
+    LOGI("  webcam-0, webcam-1 : Webcams with device IDs 0 and 1");
 
     // Parse command line arguments
-    // In a real application, you would add proper CLI argument parsing
     uint16_t port = 8080;
-    std::string shared_mem_name = "camera-1";  // Changed to match starburstd
-    std::vector<std::string> camera_ids = {"camera-1"};
+    std::string shared_mem_name = "camera-1";  // Default, kept for backward compatibility
+    std::vector<std::string> camera_ids;
     bool use_person_detector = false;
     std::string yolo_model_path = "../assets/yolo11.onnx";
     std::string yolo_labels_path = "../assets/yolo11_labels.txt";
+    
+    // Add all camera types by default (will connect to what's available)
+    // These are the dynamically generated shared memory names from starburstd
+    camera_ids.push_back("ps3-0");  // Default PS3 camera
+    camera_ids.push_back("ps3-1");  // Second PS3 camera if available
+    camera_ids.push_back("webcam-0"); // Default webcam
+    camera_ids.push_back("webcam-1"); // Second webcam if available
 
     // Parse arguments
     for (int i = 1; i < argc; i++) {
@@ -69,8 +79,8 @@ int main(int argc, char* argv[]) {
             shared_mem_name = argv[++i];
         }
         else if (arg == "--camera-id" && i + 1 < argc) {
-            if (camera_ids.size() == 1 && camera_ids[0] == "camera-1") {
-                // Clear default if this is the first camera ID
+            if (camera_ids.size() > 0) {
+                // Clear default camera IDs if user specifies their own
                 camera_ids.clear();
             }
             camera_ids.push_back(argv[++i]);
@@ -82,8 +92,8 @@ int main(int argc, char* argv[]) {
             yolo_model_path = argv[++i];
         }
         else if (arg == "--yolo-labels" && i + 1 < argc) {
-            yolo_labels_path = argv[++i];
-        }
+            yolo_labels_path = argv[++i]; 
+       }
     }
     
     LOGI("Command line parsing complete:");
@@ -99,7 +109,7 @@ int main(int argc, char* argv[]) {
     // Configure and start the service
     StreamServiceConfig config;
     config.base.name = "streamd";
-    config.base.interval_ms = 33.0;  // ~30 FPS
+    config.base.interval_ms = 16.6;  // ~60 FPS
     config.http_port = port;
     config.shared_memory_name = shared_mem_name;
     config.camera_ids = camera_ids;

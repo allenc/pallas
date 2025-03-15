@@ -13,6 +13,22 @@
 
 namespace pallas {
 
+// Cache for preprocessed JPEG frames to avoid redundant encoding
+struct CachedFrame {
+    std::vector<uint8_t> jpeg_data;
+    std::chrono::steady_clock::time_point timestamp;
+    int original_width;
+    int original_height;
+    bool has_detections;
+};
+
+// Static cache with a mutex to protect access
+static std::mutex frame_cache_mutex;
+static std::unordered_map<std::string, CachedFrame> frame_cache;
+static constexpr int CACHE_TTL_MS = 32; // Cache for 32ms (~30fps)
+static constexpr int JPEG_QUALITY_STREAMING = 85; // Better quality-to-size ratio
+static constexpr int MAX_DISPLAY_WIDTH = 640; // Larger frames for better quality
+
 // Helper function to read a file into a string
 static std::string readFile(const std::string& path) {
     std::ifstream file(path, std::ios::binary);
@@ -154,15 +170,45 @@ void StreamService::handleListCameras(struct mg_connection* c,
 void StreamService::handleGetCameraInfo(struct mg_connection* c,
                                         const std::string& camera_id,
                                         StreamService* service) {
-    // Get camera info as JSON
-    nlohmann::json camera_json = service->getCameraInfo(camera_id);
-    std::string json_str = camera_json.dump();
+    // Validate the service pointer
+    if (!service) {
+        LOGE("Invalid service pointer in handleGetCameraInfo");
+        mg_http_reply(c, 500, "Access-Control-Allow-Origin: *\r\n", 
+                     "Internal server error");
+        return;
+    }
+    
+    // Check if camera ID exists
+    bool camera_exists = false;
+    {
+        std::lock_guard<std::mutex> lock(service->mutex_);
+        camera_exists = std::find(service->camera_ids_.begin(), 
+                                 service->camera_ids_.end(), 
+                                 camera_id) != service->camera_ids_.end();
+    }
+    
+    if (!camera_exists) {
+        LOGE("Camera ID not found: {}", camera_id);
+        mg_http_reply(c, 404, "Access-Control-Allow-Origin: *\r\n", 
+                     "Camera not found");
+        return;
+    }
+    
+    try {
+        // Get camera info as JSON
+        nlohmann::json camera_json = service->getCameraInfo(camera_id);
+        std::string json_str = camera_json.dump();
 
-    // Send response
-    mg_http_reply(
-        c, 200,
-        "Content-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\n",
-        "%s", json_str.c_str());
+        // Send response
+        mg_http_reply(
+            c, 200,
+            "Content-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\n",
+            "%s", json_str.c_str());
+    } catch (const std::exception& e) {
+        LOGE("Error generating camera info for {}: {}", camera_id, e.what());
+        mg_http_reply(c, 500, "Access-Control-Allow-Origin: *\r\n", 
+                     "Error generating camera info");
+    }
 }
 
 void StreamService::handleMjpegStream(struct mg_connection* c,
@@ -173,18 +219,37 @@ void StreamService::handleMjpegStream(struct mg_connection* c,
         1;  // This tells Mongoose not to close the connection after response
     c->data[0] = 1;  // Use user data to mark this connection as MJPEG streamer
 
-    // Store camera ID in the connection data for later use
-    // We'll use a simple approach - store just a pointer to a newly allocated
-    // string
+    // Validate the service pointer and camera ID
     if (c->fn_data != service) {
         LOGE("Invalid service pointer in connection");
         mg_error(c, "Internal server error");
         return;
     }
+    
+    // Check if the camera ID is valid
+    bool camera_exists = false;
+    {
+        std::lock_guard<std::mutex> lock(service->mutex_);
+        camera_exists = std::find(service->camera_ids_.begin(), 
+                                  service->camera_ids_.end(), 
+                                  camera_id) != service->camera_ids_.end();
+    }
+    
+    if (!camera_exists) {
+        LOGE("Invalid camera ID: {}", camera_id);
+        mg_error(c, "Camera not found");
+        return;
+    }
 
     // Add the connection to the list of MJPEG streamers if not already there
+    // Use a mutex-protected map to avoid race conditions
+    static std::mutex mjpeg_connections_mutex;
     static std::unordered_map<mg_connection*, std::string> mjpeg_connections;
-    mjpeg_connections[c] = camera_id;
+    
+    {
+        std::lock_guard<std::mutex> lock(mjpeg_connections_mutex);
+        mjpeg_connections[c] = camera_id;
+    }
 
     LOGI("Starting MJPEG stream for camera {}", camera_id);
 
@@ -203,51 +268,124 @@ void StreamService::handleMjpegStream(struct mg_connection* c,
     // We create a timer callback function that will be called by Mongoose
     // periodically to send new frames
     mg_timer_add(
-        &service->mgr_, 25,  // 25ms timer (approx 40fps) for smoother streaming
+        &service->mgr_, 16,  // 16ms timer (approx 60fps) for smoother streaming
         MG_TIMER_REPEAT | MG_TIMER_RUN_NOW,
         [](void* arg) {
             // Timer callback - send frame to all active MJPEG connections
-            auto conn_map =
-                static_cast<std::unordered_map<mg_connection*, std::string>*>(
-                    arg);
-
-            // Iterate through all connections
-            for (auto it = conn_map->begin(); it != conn_map->end();) {
-                auto conn = it->first;
-                const auto& cam_id = it->second;
-
-                // Get the service pointer
-                StreamService* svc = static_cast<StreamService*>(conn->fn_data);
-
-                // Skip connections that are closed or errored
-                if (conn->is_closing || conn->is_draining) {
-                    LOGI("Removing closed MJPEG connection for camera {}",
-                         cam_id);
-                    it = conn_map->erase(it);
-                    continue;
+            auto* conn_map = static_cast<std::unordered_map<mg_connection*, std::string>*>(arg);
+            if (!conn_map) return;  // Safety check
+            
+            // Use mutex to protect the connections map
+            static std::mutex mjpeg_connections_mutex;
+            
+            // Group connections by camera to avoid redundant frame processing
+            std::unordered_map<std::string, std::vector<mg_connection*>> connections_by_camera;
+            std::vector<mg_connection*> expired_connections;
+            
+            // First, group connections by camera ID and identify expired ones
+            {
+                std::lock_guard<std::mutex> map_lock(mjpeg_connections_mutex);
+                
+                for (auto it = conn_map->begin(); it != conn_map->end(); ++it) {
+                    auto* conn = it->first;
+                    const auto& cam_id = it->second;
+                    
+                    // Skip connections that are closed or errored
+                    if (!conn || conn->is_closing || conn->is_draining) {
+                        expired_connections.push_back(conn);
+                        continue;
+                    }
+                    
+                    // Get the service pointer with validation
+                    auto* svc = static_cast<StreamService*>(conn->fn_data);
+                    if (!svc) {
+                        expired_connections.push_back(conn);
+                        continue;
+                    }
+                    
+                    // Add to connections by camera
+                    connections_by_camera[cam_id].push_back(conn);
                 }
-
-                // Create buffer for the response
-                std::vector<uint8_t> jpeg_buffer;
-                {
-                    std::lock_guard<std::mutex> lock(svc->mutex_);
-                    svc->serveLatestFrame(cam_id, jpeg_buffer);
+            }
+            
+            // Process each camera's frame once and send to all connections
+            for (auto& [cam_id, connections] : connections_by_camera) {
+                if (connections.empty()) continue;
+                
+                // Get the service pointer from the first connection
+                auto* svc = static_cast<StreamService*>(connections[0]->fn_data);
+                if (!svc) continue;
+                
+                try {
+                    // Create buffer for the response
+                    std::vector<uint8_t> jpeg_buffer;
+                    bool camera_valid = false;
+                    
+                    {
+                        std::lock_guard<std::mutex> lock(svc->mutex_);
+                        // Check if camera still exists
+                        camera_valid = std::find(svc->camera_ids_.begin(), 
+                                               svc->camera_ids_.end(), cam_id) 
+                                     != svc->camera_ids_.end();
+                        
+                        if (camera_valid) {
+                            svc->serveLatestFrame(cam_id, jpeg_buffer);
+                        }
+                    }
+                    
+                    if (!camera_valid) {
+                        // Camera no longer exists, mark all connections as expired
+                        for (auto* conn : connections) {
+                            expired_connections.push_back(conn);
+                        }
+                        continue;
+                    }
+                    
+                    if (!jpeg_buffer.empty()) {
+                        // Prepare the MJPEG part header once
+                        std::string header = fmt::format(
+                            "--mjpegstream\r\n"
+                            "Content-Type: image/jpeg\r\n"
+                            "Content-Length: {}\r\n\r\n",
+                            jpeg_buffer.size());
+                        
+                        // Send to all connections for this camera
+                        for (auto* conn : connections) {
+                            if (!conn || conn->is_closing || conn->is_draining) {
+                                expired_connections.push_back(conn);
+                                continue;
+                            }
+                            
+                            // Send header and data
+                            mg_send(conn, header.data(), header.size());
+                            mg_send(conn, jpeg_buffer.data(), jpeg_buffer.size());
+                            mg_send(conn, "\r\n", 2);  // End with CRLF
+                        }
+                    }
+                } catch (const std::exception& e) {
+                    // On error, mark all connections for this camera as expired
+                    static int error_log_counter = 0;
+                    if (++error_log_counter % 10 == 0) {
+                        LOGE("Error processing MJPEG stream for camera {}: {}", cam_id, e.what());
+                    }
+                    
+                    for (auto* conn : connections) {
+                        expired_connections.push_back(conn);
+                    }
                 }
-
-                if (!jpeg_buffer.empty()) {
-                    // Send the MJPEG part header
-                    mg_printf(conn,
-                              "--mjpegstream\r\n"
-                              "Content-Type: image/jpeg\r\n"
-                              "Content-Length: %lu\r\n\r\n",
-                              jpeg_buffer.size());
-
-                    // Send the binary JPEG data
-                    mg_send(conn, jpeg_buffer.data(), jpeg_buffer.size());
-                    mg_send(conn, "\r\n", 2);  // End with CRLF
+            }
+            
+            // Remove expired connections
+            if (!expired_connections.empty()) {
+                std::lock_guard<std::mutex> map_lock(mjpeg_connections_mutex);
+                for (auto* conn : expired_connections) {
+                    conn_map->erase(conn);
                 }
-
-                ++it;
+                
+                // Only log if multiple connections were removed
+                if (expired_connections.size() > 1) {
+                    LOGI("Removed {} expired MJPEG connections", expired_connections.size());
+                }
             }
         },
         &mjpeg_connections);
@@ -256,77 +394,117 @@ void StreamService::handleMjpegStream(struct mg_connection* c,
 void StreamService::handleGetCameraFrame(struct mg_connection* c,
                                          const std::string& camera_id,
                                          StreamService* service) {
+    // Validate service pointer first
+    if (!service) {
+        LOGE("Invalid service pointer in handleGetCameraFrame");
+        mg_http_reply(c, 500, "Access-Control-Allow-Origin: *\r\n", 
+                     "Internal server error");
+        return;
+    }
+    
+    // Check if the camera ID is valid
+    bool camera_exists = false;
+    {
+        std::lock_guard<std::mutex> lock(service->mutex_);
+        camera_exists = std::find(service->camera_ids_.begin(), 
+                                  service->camera_ids_.end(), 
+                                  camera_id) != service->camera_ids_.end();
+    }
+    
+    if (!camera_exists) {
+        LOGE("Invalid camera ID in frame request: {}", camera_id);
+        mg_http_reply(c, 404, "Access-Control-Allow-Origin: *\r\n", 
+                     "Camera not found");
+        return;
+    }
+    
     // Limit the rate of frame requests (no more than one per 25ms per
     // connection) - allows up to 40fps
+    static std::mutex request_times_mutex;
     static std::unordered_map<void*, std::chrono::steady_clock::time_point>
         last_request_times;
     auto now = std::chrono::steady_clock::now();
 
-    // Check if this client is requesting too quickly
-    auto it = last_request_times.find(c);
-    if (it != last_request_times.end()) {
-        auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
-                           now - it->second)
-                           .count();
-        if (elapsed < 25) {
-            // Too many requests, respond with a 429 (Too Many Requests)
-            LOGW(
-                "Rate limit: connection requesting too quickly ({}ms), camera "
-                "{}",
-                elapsed, camera_id);
-            mg_http_reply(c, 429, "Access-Control-Allow-Origin: *\r\n",
-                          "Too many requests. Please wait at least 25ms "
-                          "between requests.");
-            return;
-        }
-    }
-
-    // Update the last request time
-    last_request_times[c] = now;
-
-    // Create buffer for the response
-    std::vector<uint8_t> jpeg_buffer;
+    bool rate_limited = false;
     {
-        std::lock_guard<std::mutex> lock(service->mutex_);
-        service->serveLatestFrame(camera_id, jpeg_buffer);
-    }
-
-    if (!jpeg_buffer.empty()) {
-        // Send the JPEG image
-        LOGI("Sending frame for camera {}, size: {} bytes", camera_id,
-             jpeg_buffer.size());
-
-        // Send headers with additional cache control
-        mg_printf(
-            c, "%s",
-            "HTTP/1.1 200 OK\r\n"
-            "Content-Type: image/jpeg\r\n"
-            "Access-Control-Allow-Origin: *\r\n"
-            "Cache-Control: no-store, no-cache, must-revalidate, max-age=0\r\n"
-            "Pragma: no-cache\r\n"
-            "Connection: close\r\n"  // Close connection after response
-            "Content-Length: ");
-        mg_printf(c, "%lu\r\n\r\n", jpeg_buffer.size());
-
-        // Send binary data directly
-        mg_send(c, jpeg_buffer.data(), jpeg_buffer.size());
-
-        // Clean up connection-specific data for connections that are too old (5
-        // minutes)
-        auto clean_time = now - std::chrono::minutes(5);
-        for (auto it = last_request_times.begin();
-             it != last_request_times.end();) {
-            if (it->second < clean_time) {
-                it = last_request_times.erase(it);
-            } else {
-                ++it;
+        std::lock_guard<std::mutex> lock(request_times_mutex);
+        
+        // Check if this client is requesting too quickly
+        auto it = last_request_times.find(c);
+        if (it != last_request_times.end()) {
+            auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+                               now - it->second)
+                               .count();
+            if (elapsed < 25) {
+                // Too many requests, will respond with a 429 (Too Many Requests)
+                LOGW(
+                    "Rate limit: connection requesting too quickly ({}ms), camera "
+                    "{}",
+                    elapsed, camera_id);
+                rate_limited = true;
             }
         }
-    } else {
-        // Not found or error encoding
-        LOGE("No valid frame available for camera {}", camera_id);
-        mg_http_reply(c, 404, "Access-Control-Allow-Origin: *\r\n",
-                      "Camera not found or no frame available");
+        
+        if (!rate_limited) {
+            // Update the last request time
+            last_request_times[c] = now;
+            
+            // Clean up connection-specific data for connections that are too old (5 minutes)
+            auto clean_time = now - std::chrono::minutes(5);
+            for (auto it = last_request_times.begin(); it != last_request_times.end();) {
+                if (it->second < clean_time) {
+                    it = last_request_times.erase(it);
+                } else {
+                    ++it;
+                }
+            }
+        }
+    }
+    
+    if (rate_limited) {
+        mg_http_reply(c, 429, "Access-Control-Allow-Origin: *\r\n",
+                      "Too many requests. Please wait at least 25ms "
+                      "between requests.");
+        return;
+    }
+
+    try {
+        // Create buffer for the response
+        std::vector<uint8_t> jpeg_buffer;
+        {
+            std::lock_guard<std::mutex> lock(service->mutex_);
+            service->serveLatestFrame(camera_id, jpeg_buffer);
+        }
+
+        if (!jpeg_buffer.empty()) {
+            // Send the JPEG image
+            LOGI("Sending frame for camera {}, size: {} bytes", camera_id,
+                 jpeg_buffer.size());
+
+            // Send headers with additional cache control
+            mg_printf(
+                c, "%s",
+                "HTTP/1.1 200 OK\r\n"
+                "Content-Type: image/jpeg\r\n"
+                "Access-Control-Allow-Origin: *\r\n"
+                "Cache-Control: no-store, no-cache, must-revalidate, max-age=0\r\n"
+                "Pragma: no-cache\r\n"
+                "Connection: close\r\n"  // Close connection after response
+                "Content-Length: ");
+            mg_printf(c, "%lu\r\n\r\n", jpeg_buffer.size());
+
+            // Send binary data directly
+            mg_send(c, jpeg_buffer.data(), jpeg_buffer.size());
+        } else {
+            // Not found or error encoding
+            LOGE("No valid frame available for camera {}", camera_id);
+            mg_http_reply(c, 404, "Access-Control-Allow-Origin: *\r\n",
+                          "Camera not found or no frame available");
+        }
+    } catch (const std::exception& e) {
+        LOGE("Error serving frame for camera {}: {}", camera_id, e.what());
+        mg_http_reply(c, 500, "Access-Control-Allow-Origin: *\r\n",
+                      "Error processing camera frame");
     }
 }
 
@@ -432,8 +610,8 @@ bool StreamService::start() {
         http_server_running_ = true;
         http_server_thread_ = std::thread([this]() {
             while (http_server_running_) {
-                // Process events
-                mg_mgr_poll(&mgr_, 100);  // 100ms timeout
+                // Process events with shorter timeout for lower latency
+                mg_mgr_poll(&mgr_, 5);  // 5ms timeout for more responsive HTTP handling
             }
         });
 
@@ -476,59 +654,106 @@ std::expected<void, std::string> StreamService::tick() {
     // Process frames from all camera queues
     for (auto& [camera_id, queue] : camera_queues_) {
         cv::Mat frame;
-        if (queue->try_pop(frame)) {
+        if (queue->try_pop_zero_copy(frame)) {
             // Process frame and store the latest frame for each camera
             LOGI("New frame received from camera {}", camera_id);
 
-            // Store the latest frame
-            latest_frames_[camera_id] = frame.clone();
+            // Store the latest frame using zero-copy approach
+            // Mat is already a reference to shared memory, so we can just move it
+            latest_frames_[camera_id] = std::move(frame); // Zero-copy - move the reference
             any_frames_received = true;
             
-            // Run person detection if enabled
+            // Run person detection if enabled, but at a reduced rate
             if (use_person_detector_ && yolo_) {
-                try {
-                    // Run YOLO detection with default thresholds
-                    const float confidence_threshold = 0.25f;
-                    const float iou_threshold = 0.45f;
-                    
-                    auto detections = yolo_->detect(frame, confidence_threshold, iou_threshold);
-                    
-                    // Store all detections for this camera
-                    latest_detections_[camera_id] = detections;
-                    
-                    // Log detection results with more detail for debugging
-                    if (!detections.empty()) {
-                        LOGI("Detected {} objects in camera {}", detections.size(), camera_id);
+                // Track last detection time per camera to reduce processing load
+                static std::unordered_map<std::string, std::chrono::steady_clock::time_point> last_detection_time;
+                static constexpr int DETECTION_INTERVAL_MS = 200; // Run detection at ~5fps
+                
+                auto now = std::chrono::steady_clock::now();
+                bool should_run_detection = true;
+                
+                // Check if we've run detection recently for this camera
+                auto time_it = last_detection_time.find(camera_id);
+                if (time_it != last_detection_time.end()) {
+                    auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+                        now - time_it->second).count();
+                    should_run_detection = elapsed >= DETECTION_INTERVAL_MS;
+                }
+                
+                if (should_run_detection) {
+                    try {
+                        // Update detection time
+                        last_detection_time[camera_id] = now;
                         
-                        // Count person detections (class_id 0 is person in COCO dataset)
-                        int person_count = 0;
-                        for (const auto& detection : detections) {
-                            // Log each detection for detailed debugging
-                            std::string class_name = "unknown";
-                            if (yolo_ && detection.class_id < static_cast<int>(yolo_->class_names().size())) {
-                                class_name = yolo_->class_names()[detection.class_id];
+                        // Optimize YOLO detection for performance
+                        // Create a ROI (region of interest) if the frame is large
+                        // This avoids unnecessary copying while still getting good detection results
+                        cv::Mat detection_frame;
+                        int target_size = 416; // Optimal size for YOLO
+                        double scale_factor = 1.0;
+                        
+                        // Use zero-copy approaches where possible
+                        if (frame.cols <= target_size && frame.rows <= target_size) {
+                            // Frame is already small enough, use directly (zero-copy)
+                            detection_frame = frame;
+                        } else {
+                            // Need to resize - compute scale factors
+                            scale_factor = std::min(
+                                static_cast<double>(target_size) / frame.cols,
+                                static_cast<double>(target_size) / frame.rows);
+                            int new_width = static_cast<int>(frame.cols * scale_factor);
+                            int new_height = static_cast<int>(frame.rows * scale_factor);
+                            
+                            // Resize to target size (this does require a copy)
+                            cv::resize(frame, detection_frame, cv::Size(new_width, new_height), 
+                                      0, 0, cv::INTER_NEAREST); // Use fastest interpolation
+                        }
+                        
+                        // Run YOLO detection with default thresholds
+                        const float confidence_threshold = 0.25f;
+                        const float iou_threshold = 0.45f;
+                        
+                        auto detections = yolo_->detect(detection_frame, confidence_threshold, iou_threshold);
+                        
+                        // If we resized, scale detections back to original size 
+                        if (scale_factor != 1.0) {
+                            // No need to recalculate scales - just use the inverse of scale_factor
+                            double inverse_scale = 1.0 / scale_factor;
+                            
+                            for (auto& detection : detections) {
+                                detection.box.center.x *= inverse_scale;
+                                detection.box.center.y *= inverse_scale;
+                                detection.box.width *= inverse_scale;
+                                detection.box.height *= inverse_scale;
+                            }
+                        }
+                        
+                        // Store detections directly (no extra copy)
+                        latest_detections_[camera_id] = std::move(detections);
+                        
+                        // Log only occasionally to reduce overhead
+                        static int log_counter = 0;
+                        if (++log_counter % 10 == 0) {
+                            // Count person detections
+                            int person_count = 0;
+                            for (const auto& detection : latest_detections_[camera_id]) {
+                                if (detection.class_id == 0) { // Person class
+                                    person_count++;
+                                }
                             }
                             
-                            LOGI("  Detection: class_id={} ({}) conf={:.2f} at position [{},{}] size {}x{}",
-                                detection.class_id, 
-                                class_name,
-                                detection.confidence,
-                                detection.box.center.x, 
-                                detection.box.center.y,
-                                detection.box.width,
-                                detection.box.height);
-                                
-                            if (detection.class_id == 0) { // Person class
-                                person_count++;
+                            if (!latest_detections_[camera_id].empty()) {
+                                LOGI("Detected {} objects ({} people) in camera {}",
+                                     latest_detections_[camera_id].size(), person_count, camera_id);
                             }
                         }
-                        
-                        if (person_count > 0) {
-                            LOGI("Detected {} people in camera {}", person_count, camera_id);
+                    } catch (const std::exception& e) {
+                        // Log errors less frequently
+                        static int error_counter = 0;
+                        if (++error_counter % 10 == 0) {
+                            LOGE("Error during person detection: {}", e.what());
                         }
                     }
-                } catch (const std::exception& e) {
-                    LOGE("Error during person detection: {}", e.what());
                 }
             }
         }
@@ -567,94 +792,228 @@ std::expected<void, std::string> StreamService::tick() {
                             cv::Point(380, 480), cv::FONT_HERSHEY_SIMPLEX, 1.8,
                             cv::Scalar(255, 255, 255), 2);
 
-                // Store in latest frames
-                latest_frames_[camera_id] = test_frame.clone();
+                // Move the test frame directly to avoid any copying
+                latest_frames_[camera_id] = std::move(test_frame);
                 LOGI("Updated test frame for camera {}", camera_id);
             }
         }
     }
 
-    // Small sleep to avoid busy waiting
-    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    // Reduce memory usage by cleaning up old cached frames
+    {
+        std::lock_guard<std::mutex> cache_lock(frame_cache_mutex);
+        auto now = std::chrono::steady_clock::now();
+        for (auto it = frame_cache.begin(); it != frame_cache.end();) {
+            auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+                now - it->second.timestamp).count();
+            if (elapsed > 5000) { // Remove frames older than 5 seconds
+                it = frame_cache.erase(it);
+            } else {
+                ++it;
+            }
+        }
+    }
+
+    // Smaller sleep to avoid busy waiting
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
     return {};
 }
 
 void StreamService::serveLatestFrame(const std::string& camera_id,
                                      std::vector<uint8_t>& jpeg_buffer) {
+    // Note: This method should always be called with mutex_ locked by the caller
+    
+    // Ensure jpeg_buffer is empty at the start
+    jpeg_buffer.clear();
+    
+    // Check frame cache first (under its own mutex to reduce contention)
+    bool use_cached = false;
+    {
+        std::lock_guard<std::mutex> cache_lock(frame_cache_mutex);
+        auto cache_it = frame_cache.find(camera_id);
+        if (cache_it != frame_cache.end()) {
+            auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now() - cache_it->second.timestamp).count();
+            if (elapsed < CACHE_TTL_MS) {
+                // Use cached frame
+                jpeg_buffer = cache_it->second.jpeg_data;
+                use_cached = true;
+            }
+        }
+    }
+    
+    if (use_cached) {
+        // Used cached frame, exit early
+        return;
+    }
+    
     auto it = latest_frames_.find(camera_id);
-    if (it != latest_frames_.end()) {
+    if (it != latest_frames_.end() && !it->second.empty()) {
         try {
-            // Make a copy of the frame so we can draw on it
-            cv::Mat frame_to_serve = it->second.clone();
+            // Create a reference to the frame (it's already zero-copy from shared memory)
+            cv::Mat& original_frame = it->second;
             
-            // Draw bounding boxes for detections if person detection is enabled
+            // Use original frame directly if it's already the right size
+            cv::Mat* frame_to_process = &original_frame;
+            cv::Mat resized;
+            
+            // Original dimensions
+            int orig_width = original_frame.cols;
+            int orig_height = original_frame.rows;
+            
+            // Only resize if necessary
+            if (orig_width > MAX_DISPLAY_WIDTH) {
+                // Calculate aspect ratio and new size (maintain aspect ratio)
+                int target_width = std::min(MAX_DISPLAY_WIDTH, orig_width);
+                double aspect_ratio = static_cast<double>(orig_height) / orig_width;
+                int target_height = static_cast<int>(target_width * aspect_ratio);
+                
+                // Fast resize using the most appropriate algorithm
+                // Use INTER_NEAREST for higher speed if the size reduction is significant
+                if (orig_width > target_width * 2 || orig_height > target_height * 2) {
+                    cv::resize(original_frame, resized, cv::Size(target_width, target_height), 0, 0, cv::INTER_NEAREST);
+                } else {
+                    // Use INTER_AREA for better quality when downsampling slightly
+                    cv::resize(original_frame, resized, cv::Size(target_width, target_height), 0, 0, cv::INTER_AREA);
+                }
+                frame_to_process = &resized;
+            }
+            
+            // Flag to track if we have detections
+            bool has_detections = false;
+            
+            // Draw bounding boxes for detections if enabled (directly on the frame we're processing)
             if (use_person_detector_ && yolo_) {
                 auto detection_it = latest_detections_.find(camera_id);
                 if (detection_it != latest_detections_.end() && !detection_it->second.empty()) {
-                    // Draw all detections on the frame
-                    yolo_->drawBoundingBox(frame_to_serve, detection_it->second);
-                    LOGI("Drew {} detection boxes on frame for camera {}", 
-                         detection_it->second.size(), camera_id);
+                    try {
+                        // Only scale bounding boxes if we resized the frame
+                        if (frame_to_process == &resized) {
+                            // Draw all detections on the frame (scale bounding boxes to match resized frame)
+                            std::vector<Detection> scaled_detections;
+                            double scale_x = static_cast<double>(frame_to_process->cols) / orig_width;
+                            double scale_y = static_cast<double>(frame_to_process->rows) / orig_height;
+                            
+                            for (const auto& detection : detection_it->second) {
+                                Detection scaled = detection;
+                                scaled.box.center.x *= scale_x;
+                                scaled.box.center.y *= scale_y;
+                                scaled.box.width *= scale_x;
+                                scaled.box.height *= scale_y;
+                                scaled_detections.push_back(scaled);
+                            }
+                            
+                            // Draw on the resized frame
+                            yolo_->drawBoundingBox(*frame_to_process, scaled_detections);
+                        } else {
+                            // Draw directly on original frame (no scaling needed)
+                            yolo_->drawBoundingBox(*frame_to_process, detection_it->second);
+                        }
+                        
+                        has_detections = true;
+                        
+                        // Log only occasionally to reduce overhead
+                        static int log_counter = 0;
+                        if (++log_counter % 30 == 0) {
+                            LOGI("Drew {} detection boxes on frame for camera {}", 
+                                detection_it->second.size(), camera_id);
+                        }
+                    } catch (const std::exception& e) {
+                        // Log error but continue without boxes
+                        LOGE("Error drawing detection boxes: {}", e.what());
+                    }
                 }
             }
             
-            // Resize the image to a higher resolution for better quality
-            cv::Mat resized;
-            cv::resize(frame_to_serve, resized, cv::Size(640, 480), 0, 0,
-                       cv::INTER_LINEAR);
-
-            // Convert to JPEG with higher quality for better visual appearance
-            std::vector<int> params = {cv::IMWRITE_JPEG_QUALITY, 90};
-            jpeg_buffer.clear();  // Make sure buffer is empty
-            cv::imencode(".jpg", resized, jpeg_buffer, params);
-
-            LOGI(
-                "Encoded frame for camera {}, resized {}x{} → 640x480, JPEG "
-                "size: {} bytes",
-                camera_id, it->second.cols, it->second.rows,
-                jpeg_buffer.size());
+            // Encode to JPEG with optimized settings for streaming
+            std::vector<int> params = {
+                cv::IMWRITE_JPEG_QUALITY, JPEG_QUALITY_STREAMING,
+                cv::IMWRITE_JPEG_OPTIMIZE, 1,  // Enable optimization
+                cv::IMWRITE_JPEG_PROGRESSIVE, 0  // Disable progressive (faster)
+            };
+            cv::imencode(".jpg", *frame_to_process, jpeg_buffer, params);
+            
+            // Only log once in a while to reduce overhead
+            static int encode_log_counter = 0;
+            if (++encode_log_counter % 100 == 0) {
+                LOGI("Encoded frame {}x{} → {}x{}, size: {} bytes",
+                    orig_width, orig_height, frame_to_process->cols, frame_to_process->rows, jpeg_buffer.size());
+            }
+            
+            // Cache the encoded frame
+            {
+                std::lock_guard<std::mutex> cache_lock(frame_cache_mutex);
+                frame_cache[camera_id] = {
+                    jpeg_buffer,
+                    std::chrono::steady_clock::now(),
+                    orig_width,
+                    orig_height,
+                    has_detections
+                };
+            }
+            
+            return;
         } catch (const std::exception& e) {
-            LOGE("Error encoding frame for camera {}: {}", camera_id, e.what());
+            LOGE("Error processing frame: {}", e.what());
             jpeg_buffer.clear();
+            // Fall through to fallback frame
         }
-    } else {
-        // Create a test pattern at higher resolution
-        cv::Mat test_pattern(480, 640, CV_8UC3,
-                             cv::Scalar(255, 0, 0));  // Blue background
-
-        // Draw a white rectangle
-        cv::rectangle(test_pattern, cv::Point(100, 100), cv::Point(540, 380),
-                      cv::Scalar(255, 255, 255), 5);
-
-        // Add text with larger font for better readability
-        cv::putText(test_pattern, "No Camera Feed", cv::Point(160, 200),
-                    cv::FONT_HERSHEY_SIMPLEX, 1.2, cv::Scalar(255, 255, 255),
-                    2);
-        cv::putText(test_pattern, "Camera ID: " + camera_id, cv::Point(160, 260),
-                    cv::FONT_HERSHEY_SIMPLEX, 1.0, cv::Scalar(255, 255, 255),
-                    2);
-
-        // Get current time
-        std::time_t now = std::time(nullptr);
-        char time_str[100];
-        std::strftime(time_str, sizeof(time_str), "%H:%M:%S",
-                      std::localtime(&now));
-        cv::putText(test_pattern, "Time: " + std::string(time_str),
-                    cv::Point(160, 320), cv::FONT_HERSHEY_SIMPLEX, 1.0,
-                    cv::Scalar(255, 255, 255), 2);
-
-        // Encode to JPEG with higher quality
-        std::vector<int> params = {cv::IMWRITE_JPEG_QUALITY, 90};
+    } 
+    
+    // Use cached fallback frame if possible
+    static std::mutex fallback_mutex;
+    static std::unordered_map<std::string, std::vector<uint8_t>> fallback_frames;
+    static std::chrono::steady_clock::time_point last_fallback_update;
+    static constexpr int FALLBACK_UPDATE_MS = 1000; // Update fallback every second
+    
+    {
+        std::lock_guard<std::mutex> lock(fallback_mutex);
+        
+        // Check if we should update the fallback frames
+        auto now = std::chrono::steady_clock::now();
+        bool update_fallback = fallback_frames.empty() || 
+            std::chrono::duration_cast<std::chrono::milliseconds>(
+                now - last_fallback_update).count() > FALLBACK_UPDATE_MS;
+        
+        // If we have a cached fallback and don't need to update, use it
+        if (!update_fallback && fallback_frames.find(camera_id) != fallback_frames.end()) {
+            jpeg_buffer = fallback_frames[camera_id];
+            return;
+        }
+        
+        // Otherwise generate a new fallback frame
         try {
-            jpeg_buffer.clear();  // Make sure buffer is empty
+            // Simple test pattern (smaller and faster to generate)
+            cv::Mat test_pattern(240, 320, CV_8UC3, cv::Scalar(100, 0, 200));
+            
+            // Simple rectangle
+            cv::rectangle(test_pattern, cv::Point(50, 50), cv::Point(270, 190),
+                          cv::Scalar(200, 200, 255), 2);
+            
+            // Minimal text
+            cv::putText(test_pattern, "No Feed - " + camera_id, cv::Point(60, 100),
+                        cv::FONT_HERSHEY_SIMPLEX, 0.7, cv::Scalar(255, 255, 255), 1);
+            
+            // Get current time (only if updating)
+            if (update_fallback) {
+                std::time_t now_t = std::time(nullptr);
+                char time_str[20];
+                std::strftime(time_str, sizeof(time_str), "%H:%M:%S", std::localtime(&now_t));
+                cv::putText(test_pattern, time_str, cv::Point(100, 150),
+                            cv::FONT_HERSHEY_SIMPLEX, 0.7, cv::Scalar(255, 255, 255), 1);
+                
+                last_fallback_update = now;
+            }
+            
+            // Encode with lower quality
+            std::vector<int> params = {cv::IMWRITE_JPEG_QUALITY, 70};
             cv::imencode(".jpg", test_pattern, jpeg_buffer, params);
-            LOGI(
-                "Created fallback test pattern (640x480) for camera {}, "
-                "JPEG size: {} bytes",
-                camera_id, jpeg_buffer.size());
+            
+            // Cache the fallback
+            fallback_frames[camera_id] = jpeg_buffer;
+            
         } catch (const std::exception& e) {
-            LOGE("Error encoding test pattern for camera {}: {}", camera_id,
-                 e.what());
+            LOGE("Error creating fallback: {}", e.what());
             jpeg_buffer.clear();
         }
     }
