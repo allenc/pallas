@@ -46,6 +46,30 @@ Make sure you have the necessary dependencies installed:
    ```
    This starts the HTTP streaming server that provides camera streams to the frontend and processes vision tasks.
 
+   **Available Command-Line Options**:
+   ```
+   --port <port>                 : HTTP server port (default: 8080)
+   --shared-mem <name>           : Shared memory name (default: camera-1)
+   --camera-id <id>              : Camera ID (can specify multiple times)
+   --use-person-detector         : Enable person detection with YOLO
+   --use-gpu                     : Use GPU for YOLO detection (requires CUDA)
+   --active-detection-only <id>  : Only run detection on selected camera ID
+   --yolo-model <path>           : Path to YOLO model (default: ../assets/yolo11.onnx)
+   --yolo-labels <path>          : Path to YOLO labels (default: ../assets/yolo11_labels.txt)
+   ```
+
+   **Performance Optimization Examples**:
+   ```bash
+   # Enable GPU acceleration for better performance (requires CUDA)
+   ./build/streamd --use-person-detector --use-gpu
+
+   # Run detection only on a specific camera to reduce CPU/GPU load
+   ./build/streamd --use-person-detector --active-detection-only webcam-0
+
+   # Combine optimizations for best performance
+   ./build/streamd --use-person-detector --use-gpu --active-detection-only ps3-0
+   ```
+
 3. **Access the web interface**:
    Open a web browser and navigate to:
    ```

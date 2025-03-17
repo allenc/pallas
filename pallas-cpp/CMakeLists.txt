@@ -2,9 +2,10 @@ cmake_minimum_required(VERSION 3.16.0)
 project(pallas-cpp)
 
 set(DEV_MODULE Development)
-set(CMAKE_CXX_STANDARD 23)
+set(CMAKE_CXX_STANDARD 23) # Project requires C++23 for std::expected
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_BUILD_TYPE Debug)
+# Don't set _GLIBCXX_USE_CXX11_ABI=0 as it might conflict with libraries built with new ABI
 set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} -g")
 
 message("${PROJECT_SOURCE_DIR}/.cmake")
@@ -20,6 +21,7 @@ find_package(OpenCV REQUIRED)
 find_package(spdlog REQUIRED)
 find_package(onnxruntime REQUIRED)
 find_package(PkgConfig REQUIRED)
+find_package(nlohmann_json REQUIRED)
 
 # Find libusb
 pkg_check_modules(LIBUSB REQUIRED libusb-1.0)
@@ -47,22 +49,9 @@ if(NOT EXISTS "${MONGOOSE_INCLUDE_DIR}/mongoose.h" OR NOT EXISTS "${MONGOOSE_INC
     )
 endif()
 
-# Download JSON library if not found
-set(JSON_INCLUDE_DIR "${CMAKE_CURRENT_BINARY_DIR}/json_include")
-file(MAKE_DIRECTORY ${JSON_INCLUDE_DIR}/nlohmann)
-
-if(NOT EXISTS "${JSON_INCLUDE_DIR}/nlohmann/json.hpp")
-    message(STATUS "Downloading nlohmann/json.hpp")
-    file(DOWNLOAD
-        "https://github.com/nlohmann/json/releases/download/v3.11.3/json.hpp"
-        "${JSON_INCLUDE_DIR}/nlohmann/json.hpp"
-        SHOW_PROGRESS
-        TLS_VERIFY ON
-    )
-endif()
-
+# Mongoose setup message
 message(STATUS "Using Mongoose from: ${MONGOOSE_INCLUDE_DIR}")
-message(STATUS "Using nlohmann_json from: ${JSON_INCLUDE_DIR}")
+message(STATUS "Using nlohmann_json from system package")
 
 # -- Core Library --
 add_library(core STATIC
@@ -139,7 +128,6 @@ add_executable(streamd
 target_include_directories(streamd PRIVATE
   ${CMAKE_CURRENT_LIST_DIR}/src
   ${MONGOOSE_INCLUDE_DIR}
-  ${JSON_INCLUDE_DIR}
 )
 target_link_libraries(streamd PUBLIC
   core
@@ -147,6 +135,7 @@ target_link_libraries(streamd PUBLIC
   ${OpenCV_LIBS}
   pthread
   onnxruntime
+  nlohmann_json::nlohmann_json
 )
 # Define MG_ENABLE_OPENSSL=0 to disable OpenSSL
 target_compile_definitions(streamd PRIVATE 
@@ -160,13 +149,13 @@ add_executable(alert_service_demo
 )
 target_include_directories(alert_service_demo PRIVATE
   ${CMAKE_CURRENT_LIST_DIR}/src
-  ${JSON_INCLUDE_DIR}
 )
 target_link_libraries(alert_service_demo PUBLIC
   core
   vision
   ${OpenCV_LIBS}
   curl
+  nlohmann_json::nlohmann_json
 )
 
 # -- Alert Integration Example --
@@ -179,7 +168,6 @@ add_executable(alert_integration_example
 target_include_directories(alert_integration_example PRIVATE
   ${CMAKE_CURRENT_LIST_DIR}/src
   ${MONGOOSE_INCLUDE_DIR}
-  ${JSON_INCLUDE_DIR}
 )
 target_link_libraries(alert_integration_example PUBLIC
   core
@@ -187,10 +175,23 @@ target_link_libraries(alert_integration_example PUBLIC
   ${OpenCV_LIBS}
   pthread
   curl
+  nlohmann_json::nlohmann_json
 )
 # Define MG_ENABLE_OPENSSL=0 to disable OpenSSL
 target_compile_definitions(alert_integration_example PRIVATE 
   MG_ENABLE_OPENSSL=0
+)
+
+# -- CUDA Test -- 
+add_executable(cuda-test
+  process/cuda_test.cc
+)
+target_include_directories(cuda-test PRIVATE
+  ${CMAKE_CURRENT_LIST_DIR}/src
+)
+target_link_libraries(cuda-test PUBLIC
+  core
+  onnxruntime
 )
 
 # -- Executables: Tests --

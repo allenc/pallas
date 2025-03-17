@@ -28,6 +28,8 @@ struct StreamServiceConfig {
     uint16_t http_port;
     std::vector<std::string> camera_ids;
     bool use_person_detector = false;
+    bool use_gpu = false;  // Use GPU for YOLO inference
+    std::string active_detection_camera = "";  // Only run detection on this camera (empty = all)
     std::string yolo_model_path = "../assets/yolo11.onnx";
     std::string yolo_labels_path = "../assets/yolo11_labels.txt";
 };
@@ -39,6 +41,9 @@ class StreamService : public Service {
     StreamService(StreamServiceConfig config);
     bool start() override;
     void stop() override;
+    
+    // Set how often frames are processed (1 = every frame, 2 = every other frame, etc.)
+    void setFrameProcessingRate(int every_n_frames);
 
     // Get a list of all available cameras
     std::vector<std::string> getCameraIds() const { return camera_ids_; }
@@ -69,8 +74,14 @@ class StreamService : public Service {
 
     // YOLO detection
     bool use_person_detector_;
+    bool use_gpu_;  // Use GPU for YOLO inference
+    std::string active_detection_camera_;  // Only run detection on this camera (empty = all)
     std::unique_ptr<YouOnlyLookOnce> yolo_;
     std::unordered_map<std::string, std::vector<Detection>> latest_detections_;
+    
+    // Frame processing control
+    int frame_counter_{0};
+    int process_every_n_frames_{3}; // Only process every 3rd frame for better performance
 
     // Mutex for thread safety
     std::mutex mutex_;

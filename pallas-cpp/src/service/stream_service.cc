@@ -73,15 +73,25 @@ StreamService::StreamService(StreamServiceConfig config)
       http_port_(config.http_port),
       camera_ids_(config.camera_ids),
       use_person_detector_(config.use_person_detector),
+      use_gpu_(config.use_gpu),
+      active_detection_camera_(config.active_detection_camera),
       yolo_(nullptr) {
           
     if (use_person_detector_) {
         LOGI("Initializing YOLO person detector with model {} and labels {}", 
              config.yolo_model_path, config.yolo_labels_path);
         try {
+            // Initialize YOLO with GPU acceleration if requested
             yolo_ = std::make_unique<YouOnlyLookOnce>(
-                config.yolo_model_path, config.yolo_labels_path, false);
-            LOGI("YOLO model loaded successfully");
+                config.yolo_model_path, config.yolo_labels_path, use_gpu_);
+                
+            LOGI("YOLO model loaded successfully using {}", 
+                 use_gpu_ ? "GPU acceleration" : "CPU only");
+                 
+            if (!active_detection_camera_.empty()) {
+                LOGI("Active detection mode: only running detection on camera {}", 
+                     active_detection_camera_);
+            }
         } catch (const std::exception& e) {
             LOGE("Failed to load YOLO model: {}", e.what());
             use_person_detector_ = false;
@@ -644,6 +654,16 @@ void StreamService::stop() {
     Service::stop();
 }
 
+void StreamService::setFrameProcessingRate(int every_n_frames) {
+    if (every_n_frames < 1) {
+        LOGW("Invalid frame processing rate {}, using 1", every_n_frames);
+        process_every_n_frames_ = 1;
+    } else {
+        process_every_n_frames_ = every_n_frames;
+        LOGI("Set to process every {} frames for better performance", process_every_n_frames_);
+    }
+}
+
 std::expected<void, std::string> StreamService::tick() {
     // Lock for thread safety when updating latest frames
     std::lock_guard<std::mutex> lock(mutex_);
@@ -658,23 +678,39 @@ std::expected<void, std::string> StreamService::tick() {
             // Process frame and store the latest frame for each camera
             LOGI("New frame received from camera {}", camera_id);
 
-            // Store the latest frame using zero-copy approach
-            // Mat is already a reference to shared memory, so we can just move it
-            latest_frames_[camera_id] = std::move(frame); // Zero-copy - move the reference
+            // Store the latest frame - we need to make a deep copy to ensure it's not overwritten
+            // For detection to work reliably, we need stable frames that don't change
+            if (!frame.empty()) {
+                latest_frames_[camera_id] = frame.clone(); // Make a deep copy for stability
+                LOGD("Stored new frame for camera {} ({}x{})", 
+                    camera_id, latest_frames_[camera_id].cols, latest_frames_[camera_id].rows);
+            } else {
+                LOGW("Received empty frame from camera {}, ignoring", camera_id);
+            }
             any_frames_received = true;
             
             // Run person detection if enabled, but at a reduced rate
-            if (use_person_detector_ && yolo_) {
-                // Track last detection time per camera to reduce processing load
+            // Only run detection if we have a valid frame and the detector is enabled
+            if (use_person_detector_ && yolo_ && latest_frames_.find(camera_id) != latest_frames_.end() && 
+                !latest_frames_[camera_id].empty()) {
+                
+                // Skip frames based on counter for better performance
+                bool should_run_detection = (frame_counter_++ % process_every_n_frames_ == 0);
+                
+                // If active_detection_camera is set, only run detection on that camera
+                if (!active_detection_camera_.empty() && camera_id != active_detection_camera_) {
+                    should_run_detection = false;
+                }
+                
+                // Add time-based throttling on top of frame skipping
                 static std::unordered_map<std::string, std::chrono::steady_clock::time_point> last_detection_time;
                 static constexpr int DETECTION_INTERVAL_MS = 200; // Run detection at ~5fps
                 
                 auto now = std::chrono::steady_clock::now();
-                bool should_run_detection = true;
                 
                 // Check if we've run detection recently for this camera
                 auto time_it = last_detection_time.find(camera_id);
-                if (time_it != last_detection_time.end()) {
+                if (time_it != last_detection_time.end() && should_run_detection) {
                     auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
                         now - time_it->second).count();
                     should_run_detection = elapsed >= DETECTION_INTERVAL_MS;
@@ -685,35 +721,118 @@ std::expected<void, std::string> StreamService::tick() {
                         // Update detection time
                         last_detection_time[camera_id] = now;
                         
-                        // Optimize YOLO detection for performance
-                        // Create a ROI (region of interest) if the frame is large
-                        // This avoids unnecessary copying while still getting good detection results
+                        // YOLO detection needs properly formatted frames
+                        // Always make a deep copy for detection to ensure proper memory layout
                         cv::Mat detection_frame;
                         int target_size = 416; // Optimal size for YOLO
                         double scale_factor = 1.0;
                         
-                        // Use zero-copy approaches where possible
-                        if (frame.cols <= target_size && frame.rows <= target_size) {
-                            // Frame is already small enough, use directly (zero-copy)
-                            detection_frame = frame;
+                        // Use the stored frame copy that we confirmed is valid
+                        cv::Mat& current_frame = latest_frames_[camera_id];
+                        
+                        // Double check the frame is still valid
+                        if (current_frame.empty()) {
+                            LOGE("Empty stored frame for camera {}, skipping YOLO detection", camera_id);
+                            continue;
+                        }
+                        
+                        LOGI("Processing detection for camera {} with frame size {}x{}", 
+                             camera_id, current_frame.cols, current_frame.rows);
+                        
+                        // Ensure we have a proper continuous BGR image for YOLO
+                        cv::Mat continuous_frame;
+                        try {
+                            if (!current_frame.isContinuous()) {
+                                // Make a continuous copy for proper processing
+                                current_frame.copyTo(continuous_frame);
+                            } else {
+                                // Frame is already continuous but we'll still make a copy
+                                // to ensure memory layout compatibility with YOLO
+                                continuous_frame = current_frame.clone();
+                            }
+                            
+                            // Verify the copy worked
+                            if (continuous_frame.empty()) {
+                                LOGE("Failed to create continuous frame");
+                                continue;
+                            }
+                        } catch (const cv::Exception& e) {
+                            LOGE("OpenCV error creating continuous frame: {}", e.what());
+                            continue;
+                        }
+                        
+                        // Resize for optimal YOLO processing
+                        if (continuous_frame.cols <= target_size && continuous_frame.rows <= target_size) {
+                            // Small enough, but still need a properly formatted copy
+                            detection_frame = continuous_frame.clone();
                         } else {
                             // Need to resize - compute scale factors
                             scale_factor = std::min(
-                                static_cast<double>(target_size) / frame.cols,
-                                static_cast<double>(target_size) / frame.rows);
-                            int new_width = static_cast<int>(frame.cols * scale_factor);
-                            int new_height = static_cast<int>(frame.rows * scale_factor);
+                                static_cast<double>(target_size) / continuous_frame.cols,
+                                static_cast<double>(target_size) / continuous_frame.rows);
+                            int new_width = static_cast<int>(continuous_frame.cols * scale_factor);
+                            int new_height = static_cast<int>(continuous_frame.rows * scale_factor);
                             
-                            // Resize to target size (this does require a copy)
-                            cv::resize(frame, detection_frame, cv::Size(new_width, new_height), 
-                                      0, 0, cv::INTER_NEAREST); // Use fastest interpolation
+                            // Resize to target size
+                            cv::resize(continuous_frame, detection_frame, cv::Size(new_width, new_height), 
+                                      0, 0, cv::INTER_LINEAR);
+                        }
+                        
+                        // Make sure we have a valid frame before trying conversions
+                        if (detection_frame.empty()) {
+                            LOGE("Empty detection frame, skipping YOLO detection");
+                            continue;
+                        }
+                        
+                        // Create a proper BGR copy for YOLO processing
+                        // This ensures consistent memory layout and format
+                        cv::Mat bgr_detection_frame;
+                        
+                        try {
+                            // Check what format we're working with
+                            if (detection_frame.channels() == 3) {
+                                // For 3-channel images, clone to ensure proper format
+                                // This avoids potential memory layout issues
+                                bgr_detection_frame = detection_frame.clone();
+                            } else if (detection_frame.channels() == 1) {
+                                // Convert grayscale to BGR
+                                cv::cvtColor(detection_frame, bgr_detection_frame, cv::COLOR_GRAY2BGR);
+                            } else {
+                                // Handle unexpected format by creating a blank BGR image
+                                LOGW("Unexpected image format with {} channels", detection_frame.channels());
+                                bgr_detection_frame = cv::Mat(detection_frame.rows, detection_frame.cols, CV_8UC3, cv::Scalar(0, 0, 0));
+                            }
+                        } catch (const cv::Exception& e) {
+                            LOGE("OpenCV error during format conversion: {}", e.what());
+                            continue;
                         }
                         
                         // Run YOLO detection with default thresholds
                         const float confidence_threshold = 0.25f;
                         const float iou_threshold = 0.45f;
                         
-                        auto detections = yolo_->detect(detection_frame, confidence_threshold, iou_threshold);
+                        // Log detailed information about the frame being passed to YOLO
+                        LOGI("Detecting on frame: type={}, size={}x{}, channels={}, continuous={}, empty={}",
+                             bgr_detection_frame.type(), bgr_detection_frame.cols, bgr_detection_frame.rows,
+                             bgr_detection_frame.channels(), 
+                             bgr_detection_frame.isContinuous() ? "yes" : "no",
+                             bgr_detection_frame.empty() ? "yes" : "no");
+                            
+                        // Additional logging for memory alignment and structure which can affect YOLO
+                        LOGI("Frame memory: step={}, elemSize={}, total={}",
+                             bgr_detection_frame.step[0], 
+                             bgr_detection_frame.elemSize(),
+                             bgr_detection_frame.total());
+                        
+                        std::vector<Detection> detections;
+                        try {
+                            // Attempt detection with better error handling
+                            detections = yolo_->detect(bgr_detection_frame, confidence_threshold, iou_threshold);
+                            LOGI("Detection successful - found {} objects", detections.size());
+                        } catch (const std::exception& e) {
+                            LOGE("YOLO detection failed with exception: {}", e.what());
+                            continue;
+                        }
                         
                         // If we resized, scale detections back to original size 
                         if (scale_factor != 1.0) {
@@ -850,8 +969,17 @@ void StreamService::serveLatestFrame(const std::string& camera_id,
     auto it = latest_frames_.find(camera_id);
     if (it != latest_frames_.end() && !it->second.empty()) {
         try {
-            // Create a reference to the frame (it's already zero-copy from shared memory)
-            cv::Mat& original_frame = it->second;
+            // Validate the source frame first to ensure it's usable
+            if (it->second.cols <= 0 || it->second.rows <= 0 || it->second.type() <= 0) {
+                LOGE("Invalid frame dimensions or type for camera {}: {}x{} type={}", 
+                     camera_id, it->second.cols, it->second.rows, it->second.type());
+                throw std::runtime_error("Invalid frame dimensions or type");
+            }
+            
+            // Create a clone of the frame to ensure it doesn't change during encoding
+            // Must be a deep copy for thread safety
+            cv::Mat original_frame;
+            it->second.copyTo(original_frame); // Use copyTo for safer cloning
             
             // Use original frame directly if it's already the right size
             cv::Mat* frame_to_process = &original_frame;
@@ -888,11 +1016,19 @@ void StreamService::serveLatestFrame(const std::string& camera_id,
                 if (detection_it != latest_detections_.end() && !detection_it->second.empty()) {
                     try {
                         // Only scale bounding boxes if we resized the frame
-                        if (frame_to_process == &resized) {
-                            // Draw all detections on the frame (scale bounding boxes to match resized frame)
+                        // Create a drawing frame - note: we need to store this in a variable 
+                        // that doesn't go out of scope before encoding
+                        resized = frame_to_process->clone(); // Reuse resized variable to avoid dangling pointers
+                        
+                        if (frame_to_process == &original_frame) {
+                            // Draw all detections on the frame directly
+                            // No scaling needed since we're using original coordinates
+                            yolo_->drawBoundingBox(resized, detection_it->second);
+                        } else {
+                            // Scale detections to match the current frame size
                             std::vector<Detection> scaled_detections;
-                            double scale_x = static_cast<double>(frame_to_process->cols) / orig_width;
-                            double scale_y = static_cast<double>(frame_to_process->rows) / orig_height;
+                            double scale_x = static_cast<double>(resized.cols) / orig_width;
+                            double scale_y = static_cast<double>(resized.rows) / orig_height;
                             
                             for (const auto& detection : detection_it->second) {
                                 Detection scaled = detection;
@@ -904,11 +1040,11 @@ void StreamService::serveLatestFrame(const std::string& camera_id,
                             }
                             
                             // Draw on the resized frame
-                            yolo_->drawBoundingBox(*frame_to_process, scaled_detections);
-                        } else {
-                            // Draw directly on original frame (no scaling needed)
-                            yolo_->drawBoundingBox(*frame_to_process, detection_it->second);
+                            yolo_->drawBoundingBox(resized, scaled_detections);
                         }
+                        
+                        // Use the drawing frame for further processing
+                        frame_to_process = &resized;
                         
                         has_detections = true;
                         
@@ -931,7 +1067,17 @@ void StreamService::serveLatestFrame(const std::string& camera_id,
                 cv::IMWRITE_JPEG_OPTIMIZE, 1,  // Enable optimization
                 cv::IMWRITE_JPEG_PROGRESSIVE, 0  // Disable progressive (faster)
             };
-            cv::imencode(".jpg", *frame_to_process, jpeg_buffer, params);
+            
+            // Ensure we're using a valid Mat for encoding
+            // If frame_to_process is a pointer to a local variable that will go out of scope,
+            // we need to be careful
+            if (frame_to_process && !frame_to_process->empty()) {
+                cv::imencode(".jpg", *frame_to_process, jpeg_buffer, params);
+            } else {
+                // Fallback to original frame if frame_to_process is invalid
+                LOGW("Invalid frame for encoding, using original frame");
+                cv::imencode(".jpg", original_frame, jpeg_buffer, params);
+            }
             
             // Only log once in a while to reduce overhead
             static int encode_log_counter = 0;

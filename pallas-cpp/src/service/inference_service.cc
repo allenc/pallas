@@ -42,11 +42,22 @@ bool InferenceService::start() {
 
 void InferenceService::stop() { Service::stop(); }
 
+void InferenceService::setFrameProcessingRate(int every_n_frames) {
+    if (every_n_frames < 1) {
+        LOGW("Invalid frame processing rate {}, using 1", every_n_frames);
+        process_every_n_frames_ = 1;
+    } else {
+        process_every_n_frames_ = every_n_frames;
+        LOGI("Set to process every {} frames", process_every_n_frames_);
+    }
+}
+
 std::expected<void, std::string> InferenceService::tick() {
     LOGI("InferenceService::tick()");
 
     Timer timer{};
-
+    bool process_this_frame = (frame_counter_++ % process_every_n_frames_ == 0);
+    
     for (const auto& [name, queue_ptr] : queue_by_name_) {
         if (!queue_ptr) {
             LOGE("Invalid queue for {}", name);
@@ -60,7 +71,13 @@ std::expected<void, std::string> InferenceService::tick() {
         if (frame.empty()) {
             continue;
         }
-
+        
+        // Skip processing on some frames to improve performance
+        if (!process_this_frame) {
+            LOGD("Skipping frame {} for performance", frame_counter_);
+            continue;
+        }
+        
         // Check if there are any people with YOLO; thresholds match Ultralytics
         // default
         const float confidence_threshold = 0.25f;

@@ -36,6 +36,9 @@ class InferenceService : public Service {
     InferenceService(InferenceServiceConfig config);
     bool start() override;
     void stop() override;
+    
+    // Set how often frames are processed (1 = every frame, 2 = every other frame, etc.)
+    void setFrameProcessingRate(int every_n_frames);
 
    protected:
     using Queue = MatQueue<2764800>;  // MacOS frame size
@@ -46,5 +49,7 @@ class InferenceService : public Service {
     YouOnlyLookOnce yolo_;
     SegmentAnything sam_;
     std::unordered_map<std::string, std::unique_ptr<Queue>> queue_by_name_;
+    int frame_counter_{0};
+    int process_every_n_frames_{3}; // Only process every 3rd frame
 };
 }  // namespace pallas

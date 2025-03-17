@@ -13,14 +13,17 @@ int main() {
   const pallas::InferenceServiceConfig config{
       .base = {.name = "psystream", .port = 8888, .interval_ms = 50.0},
 	  .inference {
-		  .use_gpu = false,
+		  .use_gpu = true,  // Enable GPU acceleration for CUDA
 		  .yolo_path = assets_path / "yolo11.onnx",
 		  .yolo_labels_path = assets_path / "yolo11_labels.txt",
 		  .sam_encoder_path = assets_path  / "sam2.1_tiny_preprocess.onnx",
 		  .sam_decoder_path = assets_path / "sam2.1_tiny.onnx",	  
 		  .shared_memory_names = {"camera-1"}}};
   pallas::InferenceService inference_service{config};
-
+  
+  // Set to process every 3rd frame for better performance
+  inference_service.setFrameProcessingRate(3);
+  
   inference_service.start();
 
   std::this_thread::sleep_for(std::chrono::seconds(30)); 

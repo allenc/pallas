@@ -46,6 +46,8 @@ int main(int argc, char* argv[]) {
     LOGI("  --shared-mem <name>              : Shared memory name (legacy, default: camera-1)");
     LOGI("  --camera-id <id>              : Camera ID (can be specified multiple times)");
     LOGI("  --use-person-detector         : Enable person detection with YOLO");
+    LOGI("  --use-gpu                     : Use GPU for YOLO detection (requires CUDA)");
+    LOGI("  --active-detection-only <id>  : Only run detection on selected camera ID");
     LOGI("  --yolo-model <path>           : Path to YOLO model (default: ../assets/yolo11.onnx)");
     LOGI("  --yolo-labels <path>          : Path to YOLO labels (default: ../assets/yolo11_labels.txt)");
     LOGI("");
@@ -58,6 +60,8 @@ int main(int argc, char* argv[]) {
     std::string shared_mem_name = "camera-1";  // Default, kept for backward compatibility
     std::vector<std::string> camera_ids;
     bool use_person_detector = false;
+    bool use_gpu = false;  // Default to CPU for compatibility
+    std::string active_detection_camera = "";  // Empty means detect on all cameras
     std::string yolo_model_path = "../assets/yolo11.onnx";
     std::string yolo_labels_path = "../assets/yolo11_labels.txt";
     
@@ -88,6 +92,14 @@ int main(int argc, char* argv[]) {
         else if (arg == "--use-person-detector") {
             use_person_detector = true;
         }
+        else if (arg == "--use-gpu") {
+            use_gpu = true;
+            LOGI("GPU acceleration enabled for neural networks");
+        }
+        else if (arg == "--active-detection-only" && i + 1 < argc) {
+            active_detection_camera = argv[++i];
+            LOGI("Active detection mode enabled - will only run detection on camera: {}", active_detection_camera);
+        }
         else if (arg == "--yolo-model" && i + 1 < argc) {
             yolo_model_path = argv[++i];
         }
@@ -104,6 +116,9 @@ int main(int argc, char* argv[]) {
     if (use_person_detector) {
         LOGI("  YOLO model: {}", yolo_model_path);
         LOGI("  YOLO labels: {}", yolo_labels_path);
+        LOGI("  GPU acceleration: {}", use_gpu ? "Enabled" : "Disabled");
+        LOGI("  Active detection mode: {}", 
+             !active_detection_camera.empty() ? active_detection_camera : "All cameras");
     }
 
     // Configure and start the service
@@ -116,7 +131,8 @@ int main(int argc, char* argv[]) {
     config.use_person_detector = use_person_detector;
     config.yolo_model_path = yolo_model_path;
     config.yolo_labels_path = yolo_labels_path;
-    
+    config.use_gpu = use_gpu; 
+
     LOGI("Configuration: port={}, shared_memory_name={}, camera_ids={}", 
          port, shared_mem_name, fmt::join(camera_ids, ","));
          
@@ -134,6 +150,11 @@ int main(int argc, char* argv[]) {
     }
 
     service = std::make_unique<StreamService>(config);
+    
+    // Set frame processing rate for better performance
+    // Process every 3rd frame (adjust as needed)
+    service->setFrameProcessingRate(3);
+    
     if (!service->start()) {
         LOGE("Failed to start stream service");
         return 1;

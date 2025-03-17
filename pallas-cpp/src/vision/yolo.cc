@@ -16,20 +16,40 @@ YouOnlyLookOnce::YouOnlyLookOnce(const std::string& modelPath,
     sessionOptions.SetGraphOptimizationLevel(
         GraphOptimizationLevel::ORT_ENABLE_ALL);
 
-    std::vector<std::string> availableProviders = Ort::GetAvailableProviders();
-    auto cudaAvailable =
-        std::find(availableProviders.begin(), availableProviders.end(),
-                  "CUDAExecutionProvider");
-    OrtCUDAProviderOptions cudaOption;
-
-    if (useGPU && cudaAvailable != availableProviders.end()) {
-        LOGI("Inference device: GPU");
-        sessionOptions.AppendExecutionProvider_CUDA(cudaOption);
-    } else {
-        if (useGPU) {
-            LOGI("GPU not supported by ONNXRuntime build. Using CPU.");
+    try {
+        // Get available providers and print them for diagnostics
+        std::vector<std::string> availableProviders = Ort::GetAvailableProviders();
+        LOGI("Available ONNX Runtime providers:");
+        for (const auto& provider : availableProviders) {
+            LOGI(" - {}", provider);
         }
-        LOGI("Inference device: CPU.");
+        
+        auto cudaAvailable =
+            std::find(availableProviders.begin(), availableProviders.end(),
+                      "CUDAExecutionProvider");
+                      
+        if (useGPU && cudaAvailable != availableProviders.end()) {
+            LOGI("Inference device: GPU");
+            // Set CUDA device ID to 0
+            OrtCUDAProviderOptions cudaOption;
+            cudaOption.device_id = 0;
+            
+            try {
+                sessionOptions.AppendExecutionProvider_CUDA(cudaOption);
+                LOGI("Successfully added CUDA execution provider");
+            } catch (const Ort::Exception& e) {
+                LOGE("Failed to append CUDA execution provider: {}", e.what());
+                LOGI("Falling back to CPU execution provider");
+            }
+        } else {
+            if (useGPU) {
+                LOGI("GPU not supported by ONNXRuntime build. Using CPU.");
+            }
+            LOGI("Inference device: CPU.");
+        }
+    } catch (const std::exception& e) {
+        LOGE("Exception while setting up execution providers: {}", e.what());
+        LOGI("Falling back to CPU execution provider");
     }
 
 #ifdef _WIN32

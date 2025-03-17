@@ -35,7 +35,7 @@ std::ostream& operator<<(std::ostream& os, const Detection& detection);
 class YouOnlyLookOnce {
    public:
     YouOnlyLookOnce(const std::string& modelPath, const std::string& labelsPath,
-                    bool useGPU = false);
+                    bool useGPU);
 
     std::vector<Detection> detect(const cv::Mat& image,
                                   float confThreshold = 0.4f,
