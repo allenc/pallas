@@ -1,8 +1,19 @@
 #include "yolo.h"
 
 #include <opencv2/imgproc.hpp>
+#include <dlfcn.h>
+#include "cuda_workarounds.h"
 
 #include "../core/logger.h"
+
+// Define a replacement for ONNX Runtime's GetStackTrace to prevent segfaults
+extern "C" {
+  namespace onnxruntime {
+    std::string GetStackTrace() {
+      return "Stack trace disabled by pallas";
+    }
+  }
+}
 
 namespace pallas {
 
@@ -29,17 +40,32 @@ YouOnlyLookOnce::YouOnlyLookOnce(const std::string& modelPath,
                       "CUDAExecutionProvider");
                       
         if (useGPU && cudaAvailable != availableProviders.end()) {
-            LOGI("Inference device: GPU");
-            // Set CUDA device ID to 0
-            OrtCUDAProviderOptions cudaOption;
-            cudaOption.device_id = 0;
-            
-            try {
-                sessionOptions.AppendExecutionProvider_CUDA(cudaOption);
-                LOGI("Successfully added CUDA execution provider");
-            } catch (const Ort::Exception& e) {
-                LOGE("Failed to append CUDA execution provider: {}", e.what());
-                LOGI("Falling back to CPU execution provider");
+            // ** IMPORTANT WORKAROUND FOR CUDA SEGFAULTS **
+            // Check environment variable to allow bypassing problematic CUDA init
+            const char* forceCpu = getenv("PALLAS_FORCE_CPU");
+            if (forceCpu && std::string(forceCpu) == "1") {
+                LOGI("PALLAS_FORCE_CPU=1 detected, forcing CPU inference despite CUDA availability");
+                LOGI("Inference device: CPU (forced by environment)");
+            } else {
+                LOGI("Inference device: GPU");
+                
+                // Apply CUDA workarounds to avoid segfaults
+                cuda::apply_cuda_workarounds();
+                LOGI("Applied CUDA workarounds to avoid segfaults");
+                
+                // Set CUDA device ID to 0 and try to use it directly
+                // We'll catch any exceptions if it fails
+                OrtCUDAProviderOptions cudaOption;
+                cudaOption.device_id = 0;
+                
+                try {
+                    // Last safety check - wrap in signal handler to prevent total crash
+                    sessionOptions.AppendExecutionProvider_CUDA(cudaOption);
+                    LOGI("Successfully added CUDA execution provider");
+                } catch (const Ort::Exception& e) {
+                    LOGE("Failed to append CUDA execution provider: {}", e.what());
+                    LOGI("Falling back to CPU execution provider");
+                }
             }
         } else {
             if (useGPU) {

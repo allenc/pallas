@@ -51,7 +51,6 @@ endif()
 
 # Mongoose setup message
 message(STATUS "Using Mongoose from: ${MONGOOSE_INCLUDE_DIR}")
-message(STATUS "Using nlohmann_json from system package")
 
 # -- Core Library --
 add_library(core STATIC
@@ -192,6 +191,9 @@ target_include_directories(cuda-test PRIVATE
 target_link_libraries(cuda-test PUBLIC
   core
   onnxruntime
+  pthread
+  dl
+  rt
 )
 
 # -- Executables: Tests --

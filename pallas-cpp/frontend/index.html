@@ -26,6 +26,24 @@
             height: 60px;
             box-sizing: border-box;
         }
+        .capture-button {
+            width: 100%;
+            padding: 8px;
+            background-color: #4CAF50;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            font-size: 14px;
+            cursor: pointer;
+            margin-top: 10px;
+            font-weight: bold;
+        }
+        .capture-button:hover {
+            background-color: #45a049;
+        }
+        .capture-button:active {
+            background-color: #3d8b40;
+        }
         .logo {
             font-size: 1.5rem;
             font-weight: bold;
@@ -204,6 +222,10 @@
                     <div class="camera-info-label">Detections</div>
                     <div class="camera-info-value" id="camera-detections">-</div>
                 </div>
+                
+                <div class="camera-info-item">
+                    <button id="capture-button" class="capture-button">Capture Frames</button>
+                </div>
             </div>
         </div>
         
@@ -230,6 +252,8 @@
         let cameras = [];
         let currentCameraId = null;
         let streamActive = false;
+        let isCapturing = false;
+        let captureCount = 0;
         
         
         // Initialize
@@ -244,6 +268,9 @@
                 // Set up camera selection dropdown
                 setupCameraSelector();
                 
+                // Set up capture button
+                setupCaptureButton();
+                
                 // Start updating camera info periodically (not frames)
                 setInterval(updateCameraInfo, INFO_UPDATE_INTERVAL);
                 
@@ -255,6 +282,112 @@
             } catch (error) {
                 console.error('Initialization error:', error);
             }
+        }
+        
+        function setupCaptureButton() {
+            const captureButton = document.getElementById('capture-button');
+            captureButton.addEventListener('click', () => {
+                if (isCapturing) {
+                    stopCapture();
+                } else {
+                    startCapture();
+                }
+            });
+        }
+        
+        function startCapture() {
+            if (cameras.length === 0) return;
+            
+            isCapturing = true;
+            captureCount = 0;
+            
+            // Update button text
+            const captureButton = document.getElementById('capture-button');
+            captureButton.textContent = 'Stop Capturing';
+            captureButton.style.backgroundColor = '#f44336';
+            
+            console.log(`Started capturing frames for all cameras`);
+            
+            // Create capture directory with timestamp
+            const timestamp = new Date().toISOString().replace(/:/g, '-').replace(/\..+/, '');
+            const dirName = `all_cameras_${timestamp}`;
+            
+            // Start capturing frames from all cameras
+            captureAllCameraFrames(dirName);
+        }
+        
+        function stopCapture() {
+            isCapturing = false;
+            
+            // Update button text
+            const captureButton = document.getElementById('capture-button');
+            captureButton.textContent = 'Capture Frames';
+            captureButton.style.backgroundColor = '#4CAF50';
+            
+            console.log(`Stopped capturing frames. Total frames captured: ${captureCount}`);
+        }
+        
+        function captureAllCameraFrames(dirName) {
+            if (!isCapturing) return;
+            
+            // Create timestamp for filename
+            const timestamp = new Date().toISOString().replace(/:/g, '-').replace(/\..+/, '');
+            
+            // Get all online cameras
+            const onlineCameras = cameras.filter(camera => camera.online);
+            
+            // Create promises for all camera captures
+            const capturePromises = onlineCameras.map(camera => {
+                // Add timestamp to prevent caching
+                const frameUrl = `${API_BASE}/api/cameras/${camera.id}/frame?_=${Date.now()}`;
+                
+                return fetch(frameUrl)
+                    .then(response => {
+                        if (!response.ok) {
+                            console.error(`Failed to capture frame from camera ${camera.id}`);
+                            return null;
+                        }
+                        return response.blob();
+                    })
+                    .then(blob => {
+                        if (!blob) return null;
+                        
+                        const filename = `${camera.id}_${timestamp}.jpg`;
+                        
+                        // Create a download link for the blob
+                        const downloadLink = document.createElement('a');
+                        downloadLink.href = URL.createObjectURL(blob);
+                        downloadLink.download = filename;
+                        
+                        // Add to document, click to trigger download, then remove
+                        document.body.appendChild(downloadLink);
+                        downloadLink.click();
+                        document.body.removeChild(downloadLink);
+                        
+                        // Revoke the blob URL to free memory
+                        setTimeout(() => URL.revokeObjectURL(downloadLink.href), 100);
+                        
+                        console.log(`Frame captured: ${filename}`);
+                        return camera.id; // Return camera id to mark success
+                    })
+                    .catch(error => {
+                        console.error(`Error capturing frame from camera ${camera.id}:`, error);
+                        return null;
+                    });
+            });
+            
+            // Wait for all captures to complete
+            Promise.all(capturePromises)
+                .then(results => {
+                    // Count successful captures
+                    const successfulCaptures = results.filter(id => id !== null).length;
+                    captureCount += successfulCaptures;
+                    
+                    // Schedule next capture if still capturing
+                    if (isCapturing) {
+                        setTimeout(() => captureAllCameraFrames(dirName), 1000); // Capture every second
+                    }
+                });
         }
         
         async function fetchCameras() {

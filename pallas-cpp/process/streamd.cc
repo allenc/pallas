@@ -149,15 +149,38 @@ int main(int argc, char* argv[]) {
         pclose(fp);
     }
 
-    service = std::make_unique<StreamService>(config);
-    
-    // Set frame processing rate for better performance
-    // Process every 3rd frame (adjust as needed)
-    service->setFrameProcessingRate(3);
-    
-    if (!service->start()) {
-        LOGE("Failed to start stream service");
-        return 1;
+    try {
+        service = std::make_unique<StreamService>(config);
+        
+        // Set frame processing rate for better performance
+        // Process every 3rd frame (adjust as needed)
+        service->setFrameProcessingRate(3);
+        
+        if (!service->start()) {
+            LOGE("Failed to start stream service");
+            return 1;
+        }
+    } catch (const std::exception& e) {
+        LOGE("Exception during service initialization: {}", e.what());
+        // Try again with GPU disabled if the exception was related to GPU
+        if (use_gpu) {
+            LOGI("Attempting to restart without GPU acceleration");
+            config.use_gpu = false;
+            try {
+                service = std::make_unique<StreamService>(config);
+                service->setFrameProcessingRate(3);
+                if (!service->start()) {
+                    LOGE("Failed to start stream service with CPU fallback");
+                    return 1;
+                }
+                LOGI("Successfully started with CPU fallback");
+            } catch (const std::exception& e) {
+                LOGE("Exception during CPU fallback initialization: {}", e.what());
+                return 1;
+            }
+        } else {
+            return 1;
+        }
     }
 
     LOGI("Stream service started successfully");
